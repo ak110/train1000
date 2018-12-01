@@ -272,10 +272,10 @@ def _cosine_annealing_callback(base_lr, epochs):
     # [1608.03983] SGDR: Stochastic Gradient Descent with Warm Restarts
     https://arxiv.org/abs/1608.03983
     """
-    def _ca(ep, lr):
+    def _cosine_annealing(ep, lr):
         min_lr = base_lr * 0.01
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * (ep + 1) / epochs))
-    return keras.callbacks.LearningRateScheduler(_ca)
+    return keras.callbacks.LearningRateScheduler(_cosine_annealing)
 
 
 def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=False):
@@ -359,17 +359,17 @@ def _create_autoaugment():
     https://arxiv.org/abs/1805.09501
     """
     sp = {
-        'ShearX': lambda p, mag: A.IAAAffine(shear=(0, mag * 0.03), p=p),
-        'ShearY': lambda p, mag: A.IAAAffine(shear=(mag * 0.03, 0), p=p),
-        'TranslateX': lambda p, mag: A.IAAAffine(translate_percent=(mag * 0.1 * (150 / 331), 0), p=p),
-        'TranslateY': lambda p, mag: A.IAAAffine(translate_percent=(0, mag * 0.1 * (150 / 331)), p=p),
-        'Rotate': lambda p, mag: A.Rotate(limit=mag * 3, p=p),
+        'ShearX': lambda p, mag: Affine(shear_x_mag=mag, p=p),
+        'ShearY': lambda p, mag: Affine(shear_y_mag=mag, p=p),
+        'TranslateX': lambda p, mag: Affine(translate_x_mag=mag, p=p),
+        'TranslateY': lambda p, mag: Affine(translate_y_mag=mag, p=p),
+        'Rotate': lambda p, mag: A.Rotate(limit=mag / 9 * 30, p=p),
         'Color': lambda p, mag: Color(mag=mag, p=p),
         'Posterize': lambda p, mag: Posterize(mag=mag, p=p),
         'Solarize': lambda p, mag: Solarize(mag=mag, p=p),
-        'Contrast': lambda p, mag: A.RandomBrightnessContrast(brightness_limit=0, contrast_limit=mag * 0.1, p=p),
-        'Sharpness': lambda p, mag: A.IAASharpen(alpha=mag * 0.1, p=p),
-        'Brightness': lambda p, mag: A.RandomBrightnessContrast(brightness_limit=mag * 0.1, contrast_limit=0, p=p),
+        'Contrast': lambda p, mag: Contrast(mag=mag, p=p),
+        'Sharpness': lambda p, mag: Sharpness(mag=mag, p=p),
+        'Brightness': lambda p, mag: Brightness(mag=mag, p=p),
         'AutoContrast': lambda p, mag: AutoContrast(p=p),
         'Equalize': lambda p, mag: A.CLAHE(p=p),
         'Invert': lambda p, mag: A.InvertImg(p=p),
@@ -403,18 +403,41 @@ def _create_autoaugment():
     ], p=1)
 
 
+class Affine(A.ImageOnlyTransform):
+
+    def __init__(self, shear_x_mag=0, shear_y_mag=0, translate_x_mag=0, translate_y_mag=0, always_apply=False, p=.5):
+        super().__init__(always_apply, p)
+        self.shear_x_mag = shear_x_mag
+        self.shear_y_mag = shear_y_mag
+        self.translate_x_mag = translate_x_mag
+        self.translate_y_mag = translate_y_mag
+
+    def apply(self, image, shear_x, shear_y, translate_x, translate_y, **params):
+        img = PIL.Image.fromarray(image, mode='RGB')
+        data = (1, shear_x, translate_x, shear_y, 1, translate_y)
+        return np.asarray(img.transform(img.size, PIL.Image.AFFINE, data, PIL.Image.BICUBIC, fillcolor=(128, 128, 128)), dtype=np.uint8)
+
+    def get_params(self):
+        return {
+            'shear_x': self.shear_x_mag / 9 * 0.3 * np.random.choice([-1, 1]),
+            'shear_y': self.shear_y_mag / 9 * 0.3 * np.random.choice([-1, 1]),
+            'translate_x': self.translate_x_mag / 9 * (150 / 331) * np.random.choice([-1, 1]),
+            'translate_y': self.translate_y_mag / 9 * (150 / 331) * np.random.choice([-1, 1]),
+        }
+
+
 class Color(A.ImageOnlyTransform):
 
     def __init__(self, mag=10, always_apply=False, p=.5):
         super().__init__(always_apply, p)
         self.mag = mag
 
-    def apply(self, image, factor=0, **params):
+    def apply(self, image, factor=1, **params):
         img = PIL.Image.fromarray(image, mode='RGB')
         return np.asarray(PIL.ImageEnhance.Color(img).enhance(factor), dtype=np.uint8)
 
     def get_params(self):
-        return {'factor': 1 + self.mag * 0.1 * np.random.choice([-1, 1])}
+        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
 
 
 class Posterize(A.ImageOnlyTransform):
@@ -443,6 +466,48 @@ class Solarize(A.ImageOnlyTransform):
 
     def get_params(self):
         return {'threshold': 256 - self.mag * 256 / 9}
+
+
+class Contrast(A.ImageOnlyTransform):
+
+    def __init__(self, mag=10, always_apply=False, p=.5):
+        super().__init__(always_apply, p)
+        self.mag = mag
+
+    def apply(self, image, factor=1, **params):
+        img = PIL.Image.fromarray(image, mode='RGB')
+        return np.asarray(PIL.ImageEnhance.Contrast(img).enhance(factor), dtype=np.uint8)
+
+    def get_params(self):
+        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
+
+
+class Sharpness(A.ImageOnlyTransform):
+
+    def __init__(self, mag=10, always_apply=False, p=.5):
+        super().__init__(always_apply, p)
+        self.mag = mag
+
+    def apply(self, image, factor=1, **params):
+        img = PIL.Image.fromarray(image, mode='RGB')
+        return np.asarray(PIL.ImageEnhance.Sharpness(img).enhance(factor), dtype=np.uint8)
+
+    def get_params(self):
+        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
+
+
+class Brightness(A.ImageOnlyTransform):
+
+    def __init__(self, mag=10, always_apply=False, p=.5):
+        super().__init__(always_apply, p)
+        self.mag = mag
+
+    def apply(self, image, factor=1, **params):
+        img = PIL.Image.fromarray(image, mode='RGB')
+        return np.asarray(PIL.ImageEnhance.Brightness(img).enhance(factor), dtype=np.uint8)
+
+    def get_params(self):
+        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
 
 
 class AutoContrast(A.ImageOnlyTransform):
