@@ -293,7 +293,7 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=Fa
             A.RandomCrop(32, 32),
             A.HorizontalFlip(),
         ])
-        aug2 = A.Compose([A.Normalize(mean=0.5, std=0.5), A.Cutout()])
+        aug2 = A.Compose([A.Normalize(mean=0.5, std=0.5), A.Cutout(num_holes=1, max_h_size=16, max_w_size=16)])
     else:
         aug1 = A.Compose([])
         aug2 = A.Compose([A.Normalize(mean=0.5, std=0.5)])
