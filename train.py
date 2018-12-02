@@ -286,10 +286,10 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=Fa
             A.RandomSizedCrop((27, 32), 32, 32),
             A.HorizontalFlip(),
         ])
-        aug2 = A.Compose([A.Cutout(), A.ToFloat(max_value=255)])
+        aug2 = A.Compose([A.Normalize(mean=0.5, std=0.5), A.Cutout()])
     else:
         aug1 = A.Compose([])
-        aug2 = A.Compose([A.ToFloat(max_value=255)])
+        aug2 = A.Compose([A.Normalize(mean=0.5, std=0.5)])
 
     with joblib.Parallel(backend='threading', n_jobs=batch_size) as parallel:
         if shuffle:
