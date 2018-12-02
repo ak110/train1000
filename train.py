@@ -4,6 +4,7 @@ import logging
 import pathlib
 
 import albumentations as A
+import cv2
 import numpy as np
 import PIL.Image
 import PIL.ImageEnhance
@@ -287,8 +288,9 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=Fa
     """generator。"""
     if data_augmentation:
         aug1 = A.Compose([
+            A.PadIfNeeded(36, 36, border_mode=cv2.BORDER_CONSTANT, value=[127, 127, 127], p=1),
             _create_autoaugment(),
-            A.RandomSizedCrop((27, 32), 32, 32),
+            A.RandomCrop(32, 32),
             A.HorizontalFlip(),
         ])
         aug2 = A.Compose([A.Normalize(mean=0.5, std=0.5), A.Cutout()])
