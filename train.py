@@ -56,7 +56,7 @@ def _main():
     if args.check:
         epochs = 3
     else:
-        epochs = 3600 if args.model == 'full' else 300
+        epochs = 3600 if args.model == 'full' else 1800
     batch_size = 16
     base_lr = 1e-3 * batch_size * hvd.size()
 
@@ -142,14 +142,15 @@ def _create_network(input_shape, num_classes, model):
         return _layers
 
     x = inputs = keras.layers.Input(input_shape)
-    x = _conv2d(128, use_act=False)(x)
     for stage, filters in enumerate([128, 256, 384]):
-        if stage > 0:
+        if stage == 0:
+            x = _conv2d(128, use_act=False)(x)
+        else:
             if model == 'full':
                 x = _conv2d(filters, 1, use_act=False)(x)
                 x = ParallelGridPooling2D()(x)
             else:
-                x = _conv2d(filters, 3, strides=2, use_act=False)(x)
+                x = _conv2d(filters, 2, strides=2, use_act=False)(x)
         for block in range(8):
             sc = x
             x = _conv2d(filters // 4)(x)
