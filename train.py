@@ -375,7 +375,7 @@ def _create_autoaugment():
         'Sharpness': lambda p, mag: Sharpness(mag=mag, p=p),
         'Brightness': lambda p, mag: Brightness(mag=mag, p=p),
         'AutoContrast': lambda p, mag: AutoContrast(p=p),
-        'Equalize': lambda p, mag: A.CLAHE(p=p),
+        'Equalize': lambda p, mag: Equalize(p=p),
         'Invert': lambda p, mag: A.InvertImg(p=p),
     }
     return A.OneOf([
@@ -522,6 +522,19 @@ class AutoContrast(A.ImageOnlyTransform):
     def apply(self, image, **params):
         img = PIL.Image.fromarray(image, mode='RGB')
         return np.asarray(PIL.ImageOps.autocontrast(img), dtype=np.uint8)
+
+    def get_params(self):
+        return {}
+
+
+class Equalize(A.ImageOnlyTransform):
+
+    def __init__(self, always_apply=False, p=.5):
+        super().__init__(always_apply, p)
+
+    def apply(self, image, **params):
+        img = PIL.Image.fromarray(image, mode='RGB')
+        return np.asarray(PIL.ImageOps.equalize(img), dtype=np.uint8)
 
     def get_params(self):
         return {}
