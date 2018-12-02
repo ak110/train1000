@@ -55,7 +55,7 @@ def _main():
     if args.check:
         epochs = 3
     else:
-        epochs = 3600 if args.model == 'full' else 1800
+        epochs = 3600 if args.model == 'full' else 300
     batch_size = 16
     base_lr = 1e-3 * batch_size * hvd.size()
 
@@ -123,16 +123,22 @@ def _create_network(input_shape, num_classes, model):
 
     def _conv2d(filters, kernel_size=3, strides=1, use_act=True):
         def _layers(x):
-            x = keras.layers.Conv2D(filters, kernel_size=kernel_size, strides=strides, padding='same',
+            x = keras.layers.Conv2D(filters, kernel_size=kernel_size, strides=strides,
+                                    padding='same', use_bias=False,
                                     kernel_initializer='he_uniform',
                                     kernel_regularizer=reg,
                                     bias_regularizer=reg)(x)
             if model == 'full':
                 x = MixFeat()(x)
+            x = _bn_act(use_act=use_act)(x)
+            return x
+        return _layers
+
+    def _bn_act(use_act=True):
+        def _layers(x):
             x = keras.layers.BatchNormalization(gamma_regularizer=reg,
                                                 beta_regularizer=reg)(x)
-            if use_act:
-                x = keras.layers.Activation('relu')(x)
+            x = keras.layers.Activation('elu')(x) if use_act else x
             return x
         return _layers
 
@@ -153,9 +159,7 @@ def _create_network(input_shape, num_classes, model):
                 x = keras.layers.concatenate([x, t])
             x = _conv2d(filters, 1, use_act=False)(x)
             x = keras.layers.add([sc, x])
-        x = keras.layers.BatchNormalization(gamma_regularizer=reg,
-                                            beta_regularizer=reg)(x)
-        x = keras.layers.Activation('relu')(x)
+        x = _bn_act()(x)
     x = keras.layers.Dropout(0.5)(x)
     x = keras.layers.GlobalAveragePooling2D()(x)
     x = keras.layers.Dense(num_classes, activation='softmax',
