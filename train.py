@@ -84,9 +84,10 @@ def _main():
         # 検証
         pred_test = model.predict_generator(
             _generate(X_test, np.zeros((len(X_test),), dtype=np.int32), batch_size, num_classes),
-            int(np.ceil(len(X_test) / batch_size)))
-        logger.info(f'Test Accuracy:      {sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))}')
-        logger.info(f'Test Cross Entropy: {sklearn.metrics.log_loss(y_test, pred_test)}')
+            int(np.ceil(len(X_test) / batch_size)),
+            verbose=1 if hvd.rank() == 0 else 0)
+        logger.info(f'Test Accuracy:      {sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1)):.4f}')
+        logger.info(f'Test Cross Entropy: {sklearn.metrics.log_loss(y_test, pred_test):.4f}')
 
 
 def _load_data(data):
