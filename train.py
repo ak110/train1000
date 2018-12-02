@@ -77,11 +77,6 @@ def _main():
                         verbose=1 if hvd.rank() == 0 else 0)
 
     if hvd.rank() == 0:
-        # 後で何かしたくなった時のために一応保存
-        try:
-            model.save(args.results_dir / f'{args.data}.{args.model}.h5', include_optimizer=False)
-        except BaseException:
-            pass
         # 検証
         pred_test = model.predict_generator(
             _generate(X_test, np.zeros((len(X_test),), dtype=np.int32), batch_size, num_classes),
@@ -89,6 +84,8 @@ def _main():
             verbose=1 if hvd.rank() == 0 else 0)
         logger.info(f'Test Accuracy:      {sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1)):.4f}')
         logger.info(f'Test Cross Entropy: {sklearn.metrics.log_loss(y_test, pred_test):.4f}')
+        # 後で何かしたくなった時のために一応保存
+        model.save(args.results_dir / f'{args.data}.{args.model}.h5', include_optimizer=False)
 
 
 def _load_data(data):
