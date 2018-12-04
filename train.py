@@ -288,7 +288,7 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=Fa
         aug1 = A.Compose([
             A.PadIfNeeded(40, 40, border_mode=cv2.BORDER_CONSTANT, value=[127, 127, 127], p=1),
             _create_autoaugment(),
-            A.RandomCrop(32, 32),
+            A.RandomSizedCrop((20, 32), 32, 32),
             A.HorizontalFlip(),
         ])
         aug2 = A.Compose([A.Normalize(mean=0.5, std=0.5), A.Cutout(num_holes=1, max_h_size=16, max_w_size=16)])
