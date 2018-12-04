@@ -82,6 +82,7 @@ def _main():
             _generate(X_test, np.zeros((len(X_test),), dtype=np.int32), batch_size, num_classes),
             int(np.ceil(len(X_test) / batch_size)),
             verbose=1 if hvd.rank() == 0 else 0)
+        logger.info(f'Arguments:          --data={args.data} --model={args.model}')
         logger.info(f'Test Accuracy:      {sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1)):.4f}')
         logger.info(f'Test Cross Entropy: {sklearn.metrics.log_loss(y_test, pred_test):.4f}')
         # 後で何かしたくなった時のために一応保存
