@@ -31,7 +31,7 @@ def _main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', default='cifar10', choices=('mnist', 'fashion_mnist', 'cifar10', 'cifar100'))
-    parser.add_argument('--model', default='lite', choices=('lite', 'full'))
+    parser.add_argument('--model', default='light', choices=('light', 'heavy'))
     parser.add_argument('--check', action='store_true', help='3epochだけお試し実行(動作確認用)')
     parser.add_argument('--results-dir', default=pathlib.Path('results'), type=pathlib.Path)
     args = parser.parse_args()
@@ -53,11 +53,14 @@ def _main():
 
     (X_train, y_train), (X_test, y_test), num_classes = _load_data(args.data)
 
+    if args.model == 'heavy':
+        epochs = 3600
+        batch_size = 16
+    else:
+        epochs = 1800
+        batch_size = 64
     if args.check:
         epochs = 3
-    else:
-        epochs = 3600 if args.model == 'full' else 1800
-    batch_size = 16
     base_lr = 1e-3 * batch_size * hvd.size()
 
     model = _create_network(X_train.shape[1:], num_classes, args.model)
@@ -69,6 +72,7 @@ def _main():
     callbacks = [
         _cosine_annealing_callback(base_lr, epochs),
         hvd.callbacks.BroadcastGlobalVariablesCallback(0),
+        hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=5, verbose=1),
     ]
     model.fit_generator(_generate(X_train, y_train, batch_size, num_classes, shuffle=True, data_augmentation=True),
                         steps_per_epoch=int(np.ceil(len(X_train) / batch_size / hvd.size())),
@@ -82,7 +86,7 @@ def _main():
             _generate(X_test, np.zeros((len(X_test),), dtype=np.int32), batch_size, num_classes),
             int(np.ceil(len(X_test) / batch_size)),
             verbose=1 if hvd.rank() == 0 else 0)
-        logger.info(f'Arguments:          --data={args.data} --model={args.model}')
+        logger.info(f'Arguments: --data={args.data} --model={args.model}')
         logger.info(f'Test Accuracy:      {sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1)):.4f}')
         logger.info(f'Test Cross Entropy: {sklearn.metrics.log_loss(y_test, pred_test):.4f}')
         # 後で何かしたくなった時のために一応保存
@@ -121,6 +125,47 @@ def _create_network(input_shape, num_classes, model):
     """ネットワークを作成して返す。"""
     reg = keras.regularizers.l2(1e-5)
 
+    def _light(x):
+        for stage, filters in enumerate([128, 256, 384]):
+            x = _conv2d(filters, strides=1 if stage == 0 else 2, use_act=False)(x)
+            for block in range(8):
+                sc = x
+                x = _conv2d(filters, use_act=True)(x)
+                x = _conv2d(filters, use_act=False)(x)
+                x = keras.layers.add([sc, x])
+            x = _bn_act()(x)
+        x = keras.layers.Dropout(0.5)(x)
+        x = keras.layers.GlobalAveragePooling2D()(x)
+        x = keras.layers.Dense(num_classes, activation='softmax',
+                               kernel_initializer='he_uniform',
+                               kernel_regularizer=reg,
+                               bias_regularizer=reg)(x)
+        return x
+
+    def _heavy(x):
+        for stage, filters in enumerate([128, 256, 384]):
+            if stage == 0:
+                x = _conv2d(filters, use_act=False)(x)
+            else:
+                x = _conv2d(filters, 1, use_act=False)(x)
+                x = ParallelGridPooling2D()(x)
+            for block in range(8):
+                sc = x
+                x = _conv2d(filters // 4)(x)
+                for d in range(7):
+                    t = _conv2d(filters // 4)(x)
+                    x = keras.layers.concatenate([x, t])
+                x = _conv2d(filters, 1, use_act=False)(x)
+                x = keras.layers.add([sc, x])
+            x = _bn_act()(x)
+        x = keras.layers.GlobalAveragePooling2D()(x)
+        x = keras.layers.Dense(num_classes, activation='softmax',
+                               kernel_initializer='he_uniform',
+                               kernel_regularizer=reg,
+                               bias_regularizer=reg)(x)
+        x = ParallelGridGather(4 * 4)(x)
+        return x
+
     def _conv2d(filters, kernel_size=3, strides=1, use_act=True):
         def _layers(x):
             x = keras.layers.Conv2D(filters, kernel_size=kernel_size, strides=strides,
@@ -128,7 +173,7 @@ def _create_network(input_shape, num_classes, model):
                                     kernel_initializer='he_uniform',
                                     kernel_regularizer=reg,
                                     bias_regularizer=reg)(x)
-            if model == 'full':
+            if model == 'heavy':
                 x = MixFeat()(x)
             x = _bn_act(use_act=use_act)(x)
             return x
@@ -142,34 +187,9 @@ def _create_network(input_shape, num_classes, model):
             return x
         return _layers
 
-    x = inputs = keras.layers.Input(input_shape)
-    for stage, filters in enumerate([128, 256, 384]):
-        if stage == 0:
-            x = _conv2d(128, use_act=False)(x)
-        else:
-            if model == 'full':
-                x = _conv2d(filters, 1, use_act=False)(x)
-                x = ParallelGridPooling2D()(x)
-            else:
-                x = _conv2d(filters, 2, strides=2, use_act=False)(x)
-        for block in range(8):
-            sc = x
-            x = _conv2d(filters // 4)(x)
-            for d in range(7):
-                t = _conv2d(filters // 4)(x)
-                x = keras.layers.concatenate([x, t])
-            x = _conv2d(filters, 1, use_act=False)(x)
-            x = keras.layers.add([sc, x])
-        x = _bn_act()(x)
-    x = keras.layers.Dropout(0.5)(x)
-    x = keras.layers.GlobalAveragePooling2D()(x)
-    x = keras.layers.Dense(num_classes, activation='softmax',
-                           kernel_initializer='he_uniform',
-                           kernel_regularizer=reg,
-                           bias_regularizer=reg)(x)
-    if model == 'full':
-        x = ParallelGridGather(4 * 4)(x)
-    model = keras.models.Model(inputs=inputs, outputs=x)
+    inputs = keras.layers.Input(input_shape)
+    outputs = _heavy(inputs) if model == 'heavy' else _light(inputs)
+    model = keras.models.Model(inputs=inputs, outputs=outputs)
     return model
 
 
@@ -308,7 +328,8 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=Fa
         else:
             while True:
                 for i in range(0, len(X), batch_size):
-                    yield _generate_batch(X, y, aug1, aug2, num_classes, data_augmentation, range(i, i + batch_size), parallel)
+                    batch_indices = range(i, min(i + batch_size, len(X)))
+                    yield _generate_batch(X, y, aug1, aug2, num_classes, data_augmentation, batch_indices, parallel)
 
 
 def _generate_shuffled_indices(data_count):
