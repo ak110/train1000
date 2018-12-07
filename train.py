@@ -13,6 +13,7 @@ import sklearn.externals.joblib as joblib
 import sklearn.metrics
 import tensorflow as tf
 
+# tf.keras or keras。たぶんどっちでも動くつもり。
 USE_TF_KERAS = True
 if USE_TF_KERAS:
     keras = tf.keras
@@ -71,6 +72,7 @@ def _main():
 
     callbacks = [
         _cosine_annealing_callback(base_lr, epochs),
+        FreezeBNCallback(freeze_epochs=5),
         hvd.callbacks.BroadcastGlobalVariablesCallback(0),
         hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=5, verbose=1),
     ]
@@ -183,7 +185,11 @@ def _create_network(input_shape, num_classes, model):
         def _layers(x):
             x = keras.layers.BatchNormalization(gamma_regularizer=reg,
                                                 beta_regularizer=reg)(x)
-            x = keras.layers.Activation('elu')(x) if use_act else x
+            if use_act:
+                if model == 'heavy':
+                    x = DropActivation()(x)
+                else:
+                    x = keras.layers.Activation('elu')(x)
             return x
         return _layers
 
@@ -291,6 +297,31 @@ class MixFeat(keras.layers.Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
+class DropActivation(keras.layers.Layer):
+    """Drop-Activation <https://arxiv.org/abs/1811.05850>"""
+
+    def __init__(self, keep_rate=0.95, **kargs):
+        assert 0 <= keep_rate < 1
+        self.keep_rate = keep_rate
+        super().__init__(**kargs)
+
+    def call(self, inputs, training=None):  # pylint: disable=arguments-differ
+        def _train():
+            shape = keras.backend.shape(inputs)
+            b = keras.backend.random_uniform(shape=(shape[0],), dtype='float16') <= self.keep_rate
+            return tf.where(b, keras.backend.relu(inputs), inputs)
+
+        def _test():
+            return keras.backend.relu(inputs, alpha=1 - self.keep_rate)
+
+        return keras.backend.in_train_phase(_train, _test, training=training)
+
+    def get_config(self):
+        config = {'keep_rate': self.keep_rate}
+        base_config = super().get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+
 def _cosine_annealing_callback(base_lr, epochs):
     """Cosine annealing。
 
@@ -301,6 +332,52 @@ def _cosine_annealing_callback(base_lr, epochs):
         min_lr = base_lr * 0.01
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * (ep + 1) / epochs))
     return keras.callbacks.LearningRateScheduler(_cosine_annealing)
+
+
+class FreezeBNCallback(keras.callbacks.Callback):
+    """最後の指定epochsでBNを全部freezeする。
+
+    SENetの論文の最後の方にしれっと書いてあったので真似てみた。
+
+    ■Squeeze-and-Excitation Networks
+    https://arxiv.org/abs/1709.01507
+
+    # 引数
+    - freeze_epochs: BNをfreezeした状態で学習するepoch数。freeze_epochs = 5なら最後の5epochをfreeze。
+
+    """
+
+    def __init__(self, freeze_epochs):
+        self.freeze_epochs = freeze_epochs
+        super().__init__()
+
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch + 1 == self.params['epochs'] - self.freeze_epochs:
+            freezed_count = self._freeze_layers(self.model)
+            if freezed_count > 0:
+                self._recompile()
+            logger = logging.getLogger(__name__)
+            logger.info(f'Epoch {epoch + 1}: {freezed_count} BNs freezed.')
+
+    def _freeze_layers(self, container):
+        freezed_count = 0
+        for layer in container.layers:
+            if isinstance(layer, keras.layers.BatchNormalization):
+                if layer.trainable:
+                    layer.trainable = False
+                    freezed_count += 1
+            elif hasattr(layer, 'layers'):
+                freezed_count += self._freeze_layers(layer)
+        return freezed_count
+
+    def _recompile(self):
+        self.model.compile(
+            optimizer=self.model.optimizer,
+            loss=self.model.loss,
+            metrics=self.model.metrics,
+            loss_weights=self.model.loss_weights,
+            sample_weight_mode=self.model.sample_weight_mode,
+            weighted_metrics=self.model.weighted_metrics)
 
 
 def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=False):
