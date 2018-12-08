@@ -145,7 +145,7 @@ def _create_network(input_shape, num_classes, model):
         return x
 
     def _heavy(x):
-        for stage, filters in enumerate([128, 256, 384]):
+        for stage, filters in enumerate([128, 256, 256]):
             if stage == 0:
                 x = _conv2d(filters, use_act=False)(x)
             else:
@@ -200,7 +200,7 @@ def _create_network(input_shape, num_classes, model):
 
 
 class ParallelGridPooling2D(keras.layers.Layer):
-    """Parallel Grid Poolingレイヤー。"""
+    """Parallel Grid Poolingレイヤー。<https://arxiv.org/abs/1803.11370>"""
 
     def __init__(self, pool_size=(2, 2), **kargs):
         super().__init__(**kargs)
@@ -323,11 +323,7 @@ class DropActivation(keras.layers.Layer):
 
 
 def _cosine_annealing_callback(base_lr, epochs):
-    """Cosine annealing。
-
-    # [1608.03983] SGDR: Stochastic Gradient Descent with Warm Restarts
-    https://arxiv.org/abs/1608.03983
-    """
+    """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
     def _cosine_annealing(ep, lr):
         min_lr = base_lr * 0.01
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * (ep + 1) / epochs))
@@ -338,8 +334,6 @@ class FreezeBNCallback(keras.callbacks.Callback):
     """最後の指定epochsでBNを全部freezeする。
 
     SENetの論文の最後の方にしれっと書いてあったので真似てみた。
-
-    ■Squeeze-and-Excitation Networks
     https://arxiv.org/abs/1709.01507
 
     # 引数
@@ -357,7 +351,7 @@ class FreezeBNCallback(keras.callbacks.Callback):
             if freezed_count > 0:
                 self._recompile()
             logger = logging.getLogger(__name__)
-            logger.info(f'Epoch {epoch + 1}: {freezed_count} BNs freezed.')
+            logger.info(f'Epoch {epoch + 1}: {freezed_count} BNs was frozen.')
 
     def _freeze_layers(self, container):
         freezed_count = 0
@@ -457,10 +451,11 @@ def _to_categorical(index, num_classes):
 
 
 def _create_autoaugment():
-    """albumentationsでAutoAugment(CIFAR-10)な変換を作って返す。
+    """AutoAugment <https://arxiv.org/abs/1805.09501>
 
-    ■[1805.09501] AutoAugment: Learning Augmentation Policies from Data
-    https://arxiv.org/abs/1805.09501
+    元論文がPILベースでalbumentationsと挙動が合わなかったので、
+    ほとんどの変換を実装しなおしていてalbumentationsを使った意味がほとんど無い感じになっている。
+    (Rotateだけ面倒だったのでとりあえずalbumentationsを使っているけど、これも本来の挙動とは結構違う)
     """
     sp = {
         'ShearX': lambda p, mag: Affine(shear_x_mag=mag, p=p),
