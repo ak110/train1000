@@ -12,8 +12,8 @@ Kerasを使って1ファイルで全て実装したので、初心者にもわ�
 
 ```txt
 [INFO ] Arguments: --data=cifar10 --model=light
-[INFO ] Test Accuracy:      0.7382
-[INFO ] Test Cross Entropy: 0.8798
+[INFO ] Test Accuracy:      0.7668
+[INFO ] Test Cross Entropy: 0.7959
 ```
 
 ```txt

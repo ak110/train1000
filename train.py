@@ -186,10 +186,7 @@ def _create_network(input_shape, num_classes, model):
             x = keras.layers.BatchNormalization(gamma_regularizer=reg,
                                                 beta_regularizer=reg)(x)
             if use_act:
-                if model == 'heavy':
-                    x = DropActivation()(x)
-                else:
-                    x = keras.layers.Activation('elu')(x)
+                x = DropActivation()(x)
             return x
         return _layers
 
