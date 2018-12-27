@@ -18,8 +18,8 @@ Kerasを使って1ファイルで全て実装したので、初心者にもわ�
 
 ```txt
 [INFO ] Arguments: --data=cifar10 --model=heavy
-[INFO ] Test Accuracy:      0.7684
-[INFO ] Test Cross Entropy: 0.8006
+[INFO ] Test Accuracy:      0.7751
+[INFO ] Test Cross Entropy: 0.7699
 ```
 
 (1回しかやってないのであまり確かな値ではないです。)

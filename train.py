@@ -145,13 +145,13 @@ def _create_network(input_shape, num_classes, model):
         return x
 
     def _heavy(x):
-        for stage, filters in enumerate([128, 256, 256]):
+        for stage, filters in enumerate([128, 128, 128]):
             if stage == 0:
                 x = _conv2d(filters, use_act=False)(x)
             else:
                 x = _conv2d(filters, 1, use_act=False)(x)
                 x = ParallelGridPooling2D()(x)
-            for block in range(8):
+            for block in range(12):
                 sc = x
                 x = _conv2d(filters // 4)(x)
                 for d in range(7):
