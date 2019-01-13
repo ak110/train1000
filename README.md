@@ -1,6 +1,6 @@
-# train with 1000
+# Train with 1000
 
-訓練データを1000件だけ使って学習してみる試み、[train with 1000](http://www.ok.sc.e.titech.ac.jp/~mtanaka/proj/train1000/)をやってみたコード。
+訓練データを1000件だけ使って学習してみる試み、[Train with 1000](http://www.ok.sc.e.titech.ac.jp/~mtanaka/proj/train1000/)をやってみたコード。
 
 Kerasを使って1ファイルで全て実装したので、初心者にもわかりやすいコードになってます！ (嘘)
 

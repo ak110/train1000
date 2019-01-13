@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Train with 1000"""
 import argparse
 import logging
 import pathlib
@@ -130,7 +131,7 @@ def _create_network(input_shape, num_classes, model):
     def _light(x):
         for stage, filters in enumerate([128, 256, 384]):
             x = _conv2d(filters, strides=1 if stage == 0 else 2, use_act=False)(x)
-            for block in range(8):
+            for _ in range(8):
                 sc = x
                 x = _conv2d(filters, use_act=True)(x)
                 x = _conv2d(filters, use_act=False)(x)
@@ -151,10 +152,10 @@ def _create_network(input_shape, num_classes, model):
             else:
                 x = _conv2d(filters, 1, use_act=False)(x)
                 x = ParallelGridPooling2D()(x)
-            for block in range(12):
+            for _ in range(12):
                 sc = x
                 x = _conv2d(filters // 4)(x)
-                for d in range(7):
+                for _ in range(7):
                     t = _conv2d(filters // 4)(x)
                     x = keras.layers.concatenate([x, t])
                 x = _conv2d(filters, 1, use_act=False)(x)
@@ -500,6 +501,7 @@ def _create_autoaugment():
 
 
 class Affine(A.ImageOnlyTransform):
+    """Affine変換。"""
 
     def __init__(self, shear_x_mag=0, shear_y_mag=0, translate_x_mag=0, translate_y_mag=0, always_apply=False, p=.5):
         super().__init__(always_apply, p)
@@ -508,128 +510,108 @@ class Affine(A.ImageOnlyTransform):
         self.translate_x_mag = translate_x_mag
         self.translate_y_mag = translate_y_mag
 
-    def apply(self, image, shear_x, shear_y, translate_x, translate_y, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        shear_x = self.shear_x_mag / 9 * 0.3 * np.random.choice([-1, 1])
+        shear_y = self.shear_y_mag / 9 * 0.3 * np.random.choice([-1, 1])
+        translate_x = self.translate_x_mag / 9 * (150 / 331) * np.random.choice([-1, 1])
+        translate_y = self.translate_y_mag / 9 * (150 / 331) * np.random.choice([-1, 1])
+        img = PIL.Image.fromarray(img, mode='RGB')
         data = (1, shear_x, translate_x, shear_y, 1, translate_y)
         return np.asarray(img.transform(img.size, PIL.Image.AFFINE, data, PIL.Image.BICUBIC, fillcolor=(128, 128, 128)), dtype=np.uint8)
 
-    def get_params(self):
-        return {
-            'shear_x': self.shear_x_mag / 9 * 0.3 * np.random.choice([-1, 1]),
-            'shear_y': self.shear_y_mag / 9 * 0.3 * np.random.choice([-1, 1]),
-            'translate_x': self.translate_x_mag / 9 * (150 / 331) * np.random.choice([-1, 1]),
-            'translate_y': self.translate_y_mag / 9 * (150 / 331) * np.random.choice([-1, 1]),
-        }
-
 
 class Color(A.ImageOnlyTransform):
+    """PIL.ImageEnhance.ColorなTransform"""
 
     def __init__(self, mag=10, always_apply=False, p=.5):
         super().__init__(always_apply, p)
         self.mag = mag
 
-    def apply(self, image, factor=1, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        factor = 1 + self.mag / 9 * np.random.choice([-1, 1])
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageEnhance.Color(img).enhance(factor), dtype=np.uint8)
-
-    def get_params(self):
-        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
 
 
 class Posterize(A.ImageOnlyTransform):
+    """PIL.ImageOps.posterizeなTransform"""
 
     def __init__(self, mag=10, always_apply=False, p=.5):
         super().__init__(always_apply, p)
         self.mag = mag
 
-    def apply(self, image, bit=8, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        bit = np.round(8 - self.mag * 4 / 9).astype(np.int)
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageOps.posterize(img, bit), dtype=np.uint8)
-
-    def get_params(self):
-        return {'bit': np.round(8 - self.mag * 4 / 9).astype(np.int)}
 
 
 class Solarize(A.ImageOnlyTransform):
+    """PIL.ImageOps.solarizeなTransform"""
 
     def __init__(self, mag=10, always_apply=False, p=.5):
         super().__init__(always_apply, p)
         self.mag = mag
 
-    def apply(self, image, threshold=128, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        threshold = 256 - self.mag * 256 / 9
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageOps.solarize(img, threshold), dtype=np.uint8)
-
-    def get_params(self):
-        return {'threshold': 256 - self.mag * 256 / 9}
 
 
 class Contrast(A.ImageOnlyTransform):
+    """PIL.ImageEnhance.ContrastなTransform"""
 
     def __init__(self, mag=10, always_apply=False, p=.5):
         super().__init__(always_apply, p)
         self.mag = mag
 
-    def apply(self, image, factor=1, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        factor = 1 + self.mag / 9 * np.random.choice([-1, 1])
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageEnhance.Contrast(img).enhance(factor), dtype=np.uint8)
-
-    def get_params(self):
-        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
 
 
 class Sharpness(A.ImageOnlyTransform):
+    """PIL.ImageEnhance.SharpnessなTransform"""
 
     def __init__(self, mag=10, always_apply=False, p=.5):
         super().__init__(always_apply, p)
         self.mag = mag
 
-    def apply(self, image, factor=1, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        factor = 1 + self.mag / 9 * np.random.choice([-1, 1])
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageEnhance.Sharpness(img).enhance(factor), dtype=np.uint8)
-
-    def get_params(self):
-        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
 
 
 class Brightness(A.ImageOnlyTransform):
+    """PIL.ImageEnhance.BrightnessなTransform"""
 
     def __init__(self, mag=10, always_apply=False, p=.5):
         super().__init__(always_apply, p)
         self.mag = mag
 
-    def apply(self, image, factor=1, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        factor = 1 + self.mag / 9 * np.random.choice([-1, 1])
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageEnhance.Brightness(img).enhance(factor), dtype=np.uint8)
-
-    def get_params(self):
-        return {'factor': 1 + self.mag / 9 * np.random.choice([-1, 1])}
 
 
 class AutoContrast(A.ImageOnlyTransform):
+    """PIL.ImageOps.autocontrastなTransform"""
 
-    def __init__(self, always_apply=False, p=.5):
-        super().__init__(always_apply, p)
-
-    def apply(self, image, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageOps.autocontrast(img), dtype=np.uint8)
-
-    def get_params(self):
-        return {}
 
 
 class Equalize(A.ImageOnlyTransform):
+    """PIL.ImageOps.equalizeなTransform"""
 
-    def __init__(self, always_apply=False, p=.5):
-        super().__init__(always_apply, p)
-
-    def apply(self, image, **params):
-        img = PIL.Image.fromarray(image, mode='RGB')
+    def apply(self, img, **params):
+        img = PIL.Image.fromarray(img, mode='RGB')
         return np.asarray(PIL.ImageOps.equalize(img), dtype=np.uint8)
-
-    def get_params(self):
-        return {}
 
 
 if __name__ == '__main__':
