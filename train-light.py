@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train with 1000"""
+"""Train with 1000 (軽量版)"""
 import argparse
 import logging
 import pathlib
@@ -42,7 +42,7 @@ def _main():
     handlers = [logging.StreamHandler()]
     if hvd.rank() == 0:
         args.results_dir.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(args.results_dir / f'{args.data}.log', encoding='utf-8'))
+        handlers.append(logging.FileHandler(args.results_dir / f'light.{args.data}.log', encoding='utf-8'))
     logging.basicConfig(format='[%(levelname)-5s] %(message)s', level='DEBUG', handlers=handlers)
     logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def _main():
     (X_train, y_train), (X_test, y_test), num_classes = _load_data(args.data)
 
     epochs = 3 if args.check else 1800
-    batch_size = 32
+    batch_size = 64
     base_lr = 1e-3 * batch_size * hvd.size()
 
     model = _create_network(X_train.shape[1:], num_classes)
@@ -66,7 +66,6 @@ def _main():
 
     callbacks = [
         _cosine_annealing_callback(base_lr, epochs),
-        FreezeBNCallback(freeze_epochs=5),
         hvd.callbacks.BroadcastGlobalVariablesCallback(0),
         hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=5, verbose=1),
     ]
@@ -86,7 +85,7 @@ def _main():
         logger.info(f'Test Accuracy:      {sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1)):.4f}')
         logger.info(f'Test Cross Entropy: {sklearn.metrics.log_loss(y_test, pred_test):.4f}')
         # 後で何かしたくなった時のために一応保存
-        model.save(args.results_dir / f'{args.data}.h5', include_optimizer=False)
+        model.save(args.results_dir / f'light.{args.data}.h5', include_optimizer=False)
 
 
 def _load_data(data):
@@ -121,37 +120,25 @@ def _create_network(input_shape, num_classes):
     """ネットワークを作成して返す。"""
     def _network(x):
         for stage, filters in enumerate([128, 256, 384]):
-            x = _conv2d(filters, strides=1 if stage == 0 else 2, use_act=False)(x)
-            for _ in range(12):
-                sc = x
-                x = _conv2d(filters, use_act=True)(x)
-                x = _conv2d(filters, use_act=False)(x)
-                x = keras.layers.add([sc, x])
-            x = _bn_act()(x)
-        x = keras.layers.Dropout(0.5)(x)
+            x = x if stage == 0 else keras.layers.MaxPooling2D()(x)
+            x = _conv2d(filters)(x)
+            x = _conv2d(filters)(x)
+            x = _conv2d(filters)(x)
         x = keras.layers.GlobalAveragePooling2D()(x)
         x = keras.layers.Dense(num_classes, activation='softmax',
-                               kernel_regularizer=keras.regularizers.l2(1e-5),
-                               bias_regularizer=keras.regularizers.l2(1e-5))(x)
+                               kernel_regularizer=keras.regularizers.l2(1e-4),
+                               bias_regularizer=keras.regularizers.l2(1e-4))(x)
         return x
 
-    def _conv2d(filters, kernel_size=3, strides=1, use_act=True):
+    def _conv2d(filters, kernel_size=3, strides=1):
         def _layers(x):
             x = keras.layers.Conv2D(filters, kernel_size=kernel_size, strides=strides,
                                     padding='same', use_bias=False,
                                     kernel_initializer='he_uniform',
-                                    kernel_regularizer=keras.regularizers.l2(1e-5),
-                                    bias_regularizer=keras.regularizers.l2(1e-5))(x)
-            x = _bn_act(use_act=use_act)(x)
-            return x
-        return _layers
-
-    def _bn_act(use_act=True):
-        def _layers(x):
-            x = keras.layers.BatchNormalization(gamma_regularizer=keras.regularizers.l2(1e-5),
-                                                beta_regularizer=keras.regularizers.l2(1e-5))(x)
-            x = MixFeat()(x)
-            x = DropActivation()(x) if use_act else x
+                                    kernel_regularizer=keras.regularizers.l2(1e-4))(x)
+            x = keras.layers.BatchNormalization(gamma_regularizer=keras.regularizers.l2(1e-4),
+                                                beta_regularizer=keras.regularizers.l2(1e-4))(x)
+            x = keras.layers.Activation('relu')(x)
             return x
         return _layers
 
@@ -161,121 +148,12 @@ def _create_network(input_shape, num_classes):
     return model
 
 
-class MixFeat(keras.layers.Layer):
-    """MixFeat <https://openreview.net/forum?id=HygT9oRqFX>"""
-
-    def __init__(self, sigma=0.2, **kargs):
-        self.sigma = sigma
-        super().__init__(**kargs)
-
-    def call(self, inputs, training=None):  # pylint: disable=arguments-differ
-        def _passthru():
-            return inputs
-
-        def _mixfeat():
-            @tf.custom_gradient
-            def _forward(x):
-                shape = keras.backend.shape(x)
-                indices = keras.backend.arange(start=0, stop=shape[0])
-                indices = tf.random_shuffle(indices)
-                rs = keras.backend.concatenate([keras.backend.constant([1], dtype='int32'), shape[1:]])
-                r = keras.backend.random_normal(rs, 0, self.sigma, dtype='float32')
-                theta = keras.backend.random_uniform(rs, -np.pi, +np.pi, dtype='float32')
-                a = 1 + r * keras.backend.cos(theta)
-                b = r * keras.backend.sin(theta)
-                y = x * a + keras.backend.gather(x, indices) * b
-
-                def _backword(dx):
-                    inv = tf.invert_permutation(indices)
-                    return dx * a + keras.backend.gather(dx, inv) * b
-
-                return y, _backword
-
-            return _forward(inputs)
-
-        return keras.backend.in_train_phase(_mixfeat, _passthru, training=training)
-
-    def get_config(self):
-        config = {'sigma': self.sigma}
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-class DropActivation(keras.layers.Layer):
-    """Drop-Activation <https://arxiv.org/abs/1811.05850>"""
-
-    def __init__(self, keep_rate=0.95, **kargs):
-        assert 0 <= keep_rate < 1
-        self.keep_rate = keep_rate
-        super().__init__(**kargs)
-
-    def call(self, inputs, training=None):  # pylint: disable=arguments-differ
-        def _train():
-            shape = keras.backend.shape(inputs)
-            b = keras.backend.random_uniform(shape=(shape[0],), dtype='float16') <= self.keep_rate
-            return tf.where(b, keras.backend.relu(inputs), inputs)
-
-        def _test():
-            return keras.backend.relu(inputs, alpha=1 - self.keep_rate)
-
-        return keras.backend.in_train_phase(_train, _test, training=training)
-
-    def get_config(self):
-        config = {'keep_rate': self.keep_rate}
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
 def _cosine_annealing_callback(base_lr, epochs):
     """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
     def _cosine_annealing(ep, lr):
         min_lr = base_lr * 0.01
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * (ep + 1) / epochs))
     return keras.callbacks.LearningRateScheduler(_cosine_annealing)
-
-
-class FreezeBNCallback(keras.callbacks.Callback):
-    """最後の指定epochsでBNを全部freezeする。
-
-    SENetの論文の最後の方にしれっと書いてあったので真似てみた。
-    https://arxiv.org/abs/1709.01507
-
-    # 引数
-    - freeze_epochs: BNをfreezeした状態で学習するepoch数。freeze_epochs = 5なら最後の5epochをfreeze。
-
-    """
-
-    def __init__(self, freeze_epochs):
-        self.freeze_epochs = freeze_epochs
-        super().__init__()
-
-    def on_epoch_begin(self, epoch, logs=None):
-        if epoch + 1 == self.params['epochs'] - self.freeze_epochs:
-            freezed_count = self._freeze_layers(self.model)
-            if freezed_count > 0:
-                self._recompile()
-            logger = logging.getLogger(__name__)
-            logger.info(f'Epoch {epoch + 1}: {freezed_count} BNs ware frozen.')
-
-    def _freeze_layers(self, container):
-        freezed_count = 0
-        for layer in container.layers:
-            if isinstance(layer, keras.layers.BatchNormalization):
-                if layer.trainable:
-                    layer.trainable = False
-                    freezed_count += 1
-            elif hasattr(layer, 'layers'):
-                freezed_count += self._freeze_layers(layer)
-        return freezed_count
-
-    def _recompile(self):
-        self.model.compile(
-            optimizer=self.model.optimizer,
-            loss=self.model.loss,
-            metrics=self.model.metrics,
-            loss_weights=self.model.loss_weights,
-            sample_weight_mode=self.model.sample_weight_mode,
-            weighted_metrics=self.model.weighted_metrics)
 
 
 def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=False):

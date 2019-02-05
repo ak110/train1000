@@ -6,27 +6,31 @@ Kerasを使って1ファイルで全て実装したので、初心者にもわ�
 
 ## 現在の成績
 
-とりあえずCIFAR-10だけお試し中。
+とりあえずCIFAR-10だけお試し中。(各1回しかやってないのであまり確かな値ではないです。)
 
-起動引数に`--model=heavy`を付けると頑張るバージョン。デフォルト(`--model=light`)は軽量バージョン。
-
-```txt
-[INFO ] Arguments: --data=cifar10 --model=light
-[INFO ] Test Accuracy:      0.7668
-[INFO ] Test Cross Entropy: 0.7959
-```
+### `train.py`
 
 ```txt
-[INFO ] Arguments: --data=cifar10 --model=heavy
-[INFO ] Test Accuracy:      0.7751
-[INFO ] Test Cross Entropy: 0.7699
+[INFO ] Arguments: --data=cifar10
+[INFO ] Test Accuracy:      0.7715
+[INFO ] Test Cross Entropy: 0.7840
 ```
 
-(1回しかやってないのであまり確かな値ではないです。)
+PGP <https://arxiv.org/abs/1803.11370> を使ったりEpoch数を増やしたりするともうちょっと伸びるけど重いので廃止してしまった。
+
+### `train-light.py` (軽量版)
+
+```txt
+[INFO ] Arguments: --data=cifar10
+[INFO ] Test Accuracy:      0.7410
+[INFO ] Test Cross Entropy: 0.8714
+```
+
+実験など用。
 
 ## 動かすために必要なもの
 
-- TensorFlow (1.10.0で動作確認)
+- TensorFlow (1.12.0で動作確認)
 - Horovod
 - OpenMPI
 - albumentations
@@ -34,10 +38,9 @@ Kerasを使って1ファイルで全て実装したので、初心者にもわ�
 - Pillow (or Pillow-SIMD)
 - scikit-learn
 
-## やってること(`--model=heavy`)
+## やってること
 
-- ResidualでDenseな謎ネットワーク
-- Parallel Grid Pooling <https://arxiv.org/abs/1803.11370>
+- ResNet風
 - MixFeat <https://openreview.net/forum?id=HygT9oRqFX>
 - Drop-Activation <https://arxiv.org/abs/1811.05850>
 - linear learning rate (Horovod)
@@ -46,8 +49,5 @@ Kerasを使って1ファイルで全て実装したので、初心者にもわ�
 - SGD+Nesterov momentum
 - The parameters of all BN layers were frozen for the last few training epochs <https://arxiv.org/abs/1709.01507>
 - AutoAugment <https://arxiv.org/abs/1805.09501>
-
-## TODO
-
-- AutoAugmentの実装がひどすぎるので何とかしたい
-- `--model=heavy`がただでさえ重いのにGPU利用率が低めなので何とかしたい
+- Cutout <https://arxiv.org/abs/1708.04552>
+- Between-class Learning <https://arxiv.org/abs/1711.10284>
