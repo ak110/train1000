@@ -63,6 +63,7 @@ def _main():
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
     model.compile(optimizer, 'categorical_crossentropy')
     model.summary(print_fn=logger.info if hvd.rank() == 0 else lambda x: x)
+    keras.utils.plot_model(model, args.results_dir / f'{args.data}.svg', show_shapes=True)
 
     callbacks = [
         _cosine_annealing_callback(base_lr, epochs),
