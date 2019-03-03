@@ -67,7 +67,6 @@ def _main():
 
     callbacks = [
         _cosine_annealing_callback(base_lr, epochs),
-        FreezeBNCallback(freeze_epochs=5),
         hvd.callbacks.BroadcastGlobalVariablesCallback(0),
         hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=5, verbose=1),
     ]
@@ -129,7 +128,6 @@ def _create_network(input_shape, num_classes):
                 x = _conv2d(filters, use_act=False)(x)
                 x = keras.layers.add([sc, x])
             x = _bn_act()(x)
-        x = keras.layers.Dropout(0.5)(x)
         x = keras.layers.GlobalAveragePooling2D()(x)
         x = keras.layers.Dense(num_classes, activation='softmax',
                                kernel_regularizer=keras.regularizers.l2(1e-5),
@@ -141,18 +139,16 @@ def _create_network(input_shape, num_classes):
             x = keras.layers.Conv2D(filters, kernel_size=kernel_size, strides=strides,
                                     padding='same', use_bias=False,
                                     kernel_initializer='he_uniform',
-                                    kernel_regularizer=keras.regularizers.l2(1e-5),
-                                    bias_regularizer=keras.regularizers.l2(1e-5))(x)
+                                    kernel_regularizer=keras.regularizers.l2(1e-5))(x)
             x = _bn_act(use_act=use_act)(x)
             return x
         return _layers
 
     def _bn_act(use_act=True):
         def _layers(x):
-            x = keras.layers.BatchNormalization(gamma_regularizer=keras.regularizers.l2(1e-5),
-                                                beta_regularizer=keras.regularizers.l2(1e-5))(x)
+            x = keras.layers.BatchNormalization(gamma_regularizer=keras.regularizers.l2(1e-5))(x)
             x = MixFeat()(x)
-            x = DropActivation()(x) if use_act else x
+            x = keras.layers.Activation('relu')(x) if use_act else x
             return x
         return _layers
 
@@ -202,81 +198,12 @@ class MixFeat(keras.layers.Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
-class DropActivation(keras.layers.Layer):
-    """Drop-Activation <https://arxiv.org/abs/1811.05850>"""
-
-    def __init__(self, keep_rate=0.95, **kargs):
-        assert 0 <= keep_rate < 1
-        self.keep_rate = keep_rate
-        super().__init__(**kargs)
-
-    def call(self, inputs, training=None):  # pylint: disable=arguments-differ
-        def _train():
-            shape = keras.backend.shape(inputs)
-            b = keras.backend.random_uniform(shape=(shape[0],), dtype='float16') <= self.keep_rate
-            return tf.where(b, keras.backend.relu(inputs), inputs)
-
-        def _test():
-            return keras.backend.relu(inputs, alpha=1 - self.keep_rate)
-
-        return keras.backend.in_train_phase(_train, _test, training=training)
-
-    def get_config(self):
-        config = {'keep_rate': self.keep_rate}
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
 def _cosine_annealing_callback(base_lr, epochs):
     """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
     def _cosine_annealing(ep, lr):
         min_lr = base_lr * 0.01
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * (ep + 1) / epochs))
     return keras.callbacks.LearningRateScheduler(_cosine_annealing)
-
-
-class FreezeBNCallback(keras.callbacks.Callback):
-    """最後の指定epochsでBNを全部freezeする。
-
-    SENetの論文の最後の方にしれっと書いてあったので真似てみた。
-    https://arxiv.org/abs/1709.01507
-
-    # 引数
-    - freeze_epochs: BNをfreezeした状態で学習するepoch数。freeze_epochs = 5なら最後の5epochをfreeze。
-
-    """
-
-    def __init__(self, freeze_epochs):
-        self.freeze_epochs = freeze_epochs
-        super().__init__()
-
-    def on_epoch_begin(self, epoch, logs=None):
-        if epoch + 1 == self.params['epochs'] - self.freeze_epochs:
-            freezed_count = self._freeze_layers(self.model)
-            if freezed_count > 0:
-                self._recompile()
-            logger = logging.getLogger(__name__)
-            logger.info(f'Epoch {epoch + 1}: {freezed_count} BNs ware frozen.')
-
-    def _freeze_layers(self, container):
-        freezed_count = 0
-        for layer in container.layers:
-            if isinstance(layer, keras.layers.BatchNormalization):
-                if layer.trainable:
-                    layer.trainable = False
-                    freezed_count += 1
-            elif hasattr(layer, 'layers'):
-                freezed_count += self._freeze_layers(layer)
-        return freezed_count
-
-    def _recompile(self):
-        self.model.compile(
-            optimizer=self.model.optimizer,
-            loss=self.model.loss,
-            metrics=self.model.metrics,
-            loss_weights=self.model.loss_weights,
-            sample_weight_mode=self.model.sample_weight_mode,
-            weighted_metrics=self.model.weighted_metrics)
 
 
 def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation=False):
@@ -345,6 +272,7 @@ def _generate_instance(X, y, aug1, aug2, num_classes, data_augmentation, index):
         c_i = (c_i * r + c_t * (1 - r)).astype(np.float32)
 
     X_i = aug2(image=X_i)['image']
+
     return X_i, c_i
 
 

@@ -12,8 +12,8 @@ Kerasを使って1ファイルで全て実装したので、初心者にもわ�
 
 ```txt
 [INFO ] Arguments: --data=cifar10
-[INFO ] Test Accuracy:      0.7715
-[INFO ] Test Cross Entropy: 0.7840
+[INFO ] Test Accuracy:      0.7696
+[INFO ] Test Cross Entropy: 0.7939
 ```
 
 PGP <https://arxiv.org/abs/1803.11370> を使ったりEpoch数を増やしたりするともうちょっと伸びるけど重いので廃止してしまった。
@@ -22,8 +22,8 @@ PGP <https://arxiv.org/abs/1803.11370> を使ったりEpoch数を増やしたり
 
 ```txt
 [INFO ] Arguments: --data=cifar10
-[INFO ] Test Accuracy:      0.7410
-[INFO ] Test Cross Entropy: 0.8714
+[INFO ] Test Accuracy:      0.7612
+[INFO ] Test Cross Entropy: 0.7967
 ```
 
 実験など用。
@@ -42,12 +42,10 @@ PGP <https://arxiv.org/abs/1803.11370> を使ったりEpoch数を増やしたり
 
 - ResNet風
 - MixFeat <https://openreview.net/forum?id=HygT9oRqFX>
-- Drop-Activation <https://arxiv.org/abs/1811.05850>
 - linear learning rate (Horovod)
 - learning rate warmup (Horovod)
 - cosine annealing <https://arxiv.org/abs/1608.03983>
 - SGD+Nesterov momentum
-- The parameters of all BN layers were frozen for the last few training epochs <https://arxiv.org/abs/1709.01507>
 - AutoAugment <https://arxiv.org/abs/1805.09501>
 - Cutout <https://arxiv.org/abs/1708.04552>
 - Between-class Learning <https://arxiv.org/abs/1711.10284>

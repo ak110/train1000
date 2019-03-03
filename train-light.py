@@ -63,6 +63,7 @@ def _main():
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
     model.compile(optimizer, 'categorical_crossentropy')
     model.summary(print_fn=logger.info if hvd.rank() == 0 else lambda x: x)
+    keras.utils.plot_model(model, args.results_dir / f'light.{args.data}.svg', show_shapes=True)
 
     callbacks = [
         _cosine_annealing_callback(base_lr, epochs),
@@ -120,25 +121,34 @@ def _create_network(input_shape, num_classes):
     """ネットワークを作成して返す。"""
     def _network(x):
         for stage, filters in enumerate([128, 256, 384]):
-            x = x if stage == 0 else keras.layers.MaxPooling2D()(x)
-            x = _conv2d(filters)(x)
-            x = _conv2d(filters)(x)
-            x = _conv2d(filters)(x)
+            x = _conv2d(filters, strides=1 if stage == 0 else 2, use_act=False)(x)
+            for _ in range(8):
+                sc = x
+                x = _conv2d(filters, use_act=True)(x)
+                x = _conv2d(filters, use_act=False)(x)
+                x = keras.layers.add([sc, x])
+                x = keras.layers.Lambda(lambda x: x / np.sqrt(2))(x)
+            x = _bn_act(use_bn=False)(x)
         x = keras.layers.GlobalAveragePooling2D()(x)
         x = keras.layers.Dense(num_classes, activation='softmax',
-                               kernel_regularizer=keras.regularizers.l2(1e-4),
-                               bias_regularizer=keras.regularizers.l2(1e-4))(x)
+                               kernel_regularizer=keras.regularizers.l2(1e-5),
+                               bias_regularizer=keras.regularizers.l2(1e-5))(x)
         return x
 
-    def _conv2d(filters, kernel_size=3, strides=1):
+    def _conv2d(filters, kernel_size=3, strides=1, use_act=True):
         def _layers(x):
             x = keras.layers.Conv2D(filters, kernel_size=kernel_size, strides=strides,
                                     padding='same', use_bias=False,
                                     kernel_initializer='he_uniform',
-                                    kernel_regularizer=keras.regularizers.l2(1e-4))(x)
-            x = keras.layers.BatchNormalization(gamma_regularizer=keras.regularizers.l2(1e-4),
-                                                beta_regularizer=keras.regularizers.l2(1e-4))(x)
-            x = keras.layers.Activation('relu')(x)
+                                    kernel_regularizer=keras.regularizers.l2(1e-5))(x)
+            x = _bn_act(use_act=use_act)(x)
+            return x
+        return _layers
+
+    def _bn_act(use_bn=True, use_act=True):
+        def _layers(x):
+            x = keras.layers.BatchNormalization(scale=False)(x) if use_bn else x
+            x = keras.layers.Activation('relu')(x) if use_act else x
             return x
         return _layers
 
