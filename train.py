@@ -33,6 +33,7 @@ def _main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', default='cifar10', choices=('mnist', 'fashion_mnist', 'cifar10', 'cifar100'))
+    parser.add_argument('--model', default='default', choices=('default', 'resnet25', 'vgg10'))
     parser.add_argument('--check', action='store_true', help='3epochだけお試し実行(動作確認用)')
     parser.add_argument('--results-dir', default=pathlib.Path('results'), type=pathlib.Path)
     args = parser.parse_args()
@@ -42,7 +43,7 @@ def _main():
     handlers = [logging.StreamHandler()]
     if hvd.rank() == 0:
         args.results_dir.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(args.results_dir / f'{args.data}.log', encoding='utf-8'))
+        handlers.append(logging.FileHandler(args.results_dir / f'{args.data}.{args.model}.log', encoding='utf-8'))
     logging.basicConfig(format='[%(levelname)-5s] %(message)s', level='DEBUG', handlers=handlers)
     logger = logging.getLogger(__name__)
 
@@ -54,16 +55,20 @@ def _main():
 
     (X_train, y_train), (X_test, y_test), num_classes = _load_data(args.data)
 
-    epochs = 3 if args.check else 1800
+    epochs = 5 if args.check else 1800
     batch_size = 32
     base_lr = 1e-3 * batch_size * hvd.size()
 
-    model = _create_network(X_train.shape[1:], num_classes)
+    model = {
+        'default': _create_network,
+        'resnet25': _create_network_resnet25,
+        'vgg10': _create_network_vgg10,
+    }[args.model](X_train.shape[1:], num_classes)
     optimizer = keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
     model.compile(optimizer, 'categorical_crossentropy')
     model.summary(print_fn=logger.info if hvd.rank() == 0 else lambda x: x)
-    keras.utils.plot_model(model, args.results_dir / f'{args.data}.svg', show_shapes=True)
+    keras.utils.plot_model(model, args.results_dir / f'{args.data}.{args.model}.svg', show_shapes=True)
 
     callbacks = [
         _cosine_annealing_callback(base_lr, epochs),
@@ -82,11 +87,11 @@ def _main():
             _generate(X_test, np.zeros((len(X_test),), dtype=np.int32), batch_size, num_classes),
             int(np.ceil(len(X_test) / batch_size)),
             verbose=1 if hvd.rank() == 0 else 0)
-        logger.info(f'Arguments: --data={args.data}')
+        logger.info(f'Arguments: --data={args.data} --model={args.model}')
         logger.info(f'Test Accuracy:      {sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1)):.4f}')
         logger.info(f'Test Cross Entropy: {sklearn.metrics.log_loss(y_test, pred_test):.4f}')
         # 後で何かしたくなった時のために一応保存
-        model.save(args.results_dir / f'{args.data}.h5', include_optimizer=False)
+        model.save(args.results_dir / f'{args.data}.{args.model}.h5', include_optimizer=False)
 
 
 def _load_data(data):
@@ -119,20 +124,31 @@ def _extract1000(X, y, num_classes):
 
 def _create_network(input_shape, num_classes):
     """ネットワークを作成して返す。"""
-    def _network(x):
-        for stage, filters in enumerate([128, 256, 384]):
-            x = _conv2d(filters, strides=1 if stage == 0 else 2, use_act=False)(x)
-            for _ in range(12):
+    def _create():
+        inputs = x = keras.layers.Input(input_shape)
+        x = _conv2d(128, use_act=False)(x)
+        x = _blocks(128, 12)(x)
+        x = _conv2d(256, strides=2, use_act=False)(x)
+        x = _blocks(256, 12)(x)
+        x = _conv2d(512, strides=2, use_act=False)(x)
+        x = _blocks(512, 12)(x)
+        x = keras.layers.GlobalAveragePooling2D()(x)
+        x = keras.layers.Dense(num_classes, activation='softmax',
+                               kernel_regularizer=keras.regularizers.l2(1e-5),
+                               bias_regularizer=keras.regularizers.l2(1e-5))(x)
+        model = keras.models.Model(inputs=inputs, outputs=x)
+        return model
+
+    def _blocks(filters, count):
+        def _layers(x):
+            for _ in range(count):
                 sc = x
                 x = _conv2d(filters, use_act=True)(x)
                 x = _conv2d(filters, use_act=False)(x)
                 x = keras.layers.add([sc, x])
             x = _bn_act()(x)
-        x = keras.layers.GlobalAveragePooling2D()(x)
-        x = keras.layers.Dense(num_classes, activation='softmax',
-                               kernel_regularizer=keras.regularizers.l2(1e-5),
-                               bias_regularizer=keras.regularizers.l2(1e-5))(x)
-        return x
+            return x
+        return _layers
 
     def _conv2d(filters, kernel_size=3, strides=1, use_act=True):
         def _layers(x):
@@ -152,10 +168,91 @@ def _create_network(input_shape, num_classes):
             return x
         return _layers
 
-    inputs = keras.layers.Input(input_shape)
-    outputs = _network(inputs)
-    model = keras.models.Model(inputs=inputs, outputs=outputs)
-    return model
+    return _create()
+
+
+def _create_network_resnet25(input_shape, num_classes):
+    """ネットワークを作成して返す。(軽めのResNet)"""
+    def _create():
+        inputs = x = keras.layers.Input(input_shape)
+        x = _conv2d(128, use_act=False)(x)
+        x = _blocks(128, 8)(x)
+        x = _conv2d(256, strides=2, use_act=False)(x)
+        x = _blocks(256, 8)(x)
+        x = _conv2d(512, strides=2, use_act=False)(x)
+        x = _blocks(512, 8)(x)
+        x = keras.layers.GlobalAveragePooling2D()(x)
+        x = keras.layers.Dense(num_classes, activation='softmax',
+                               kernel_regularizer=keras.regularizers.l2(1e-5),
+                               bias_regularizer=keras.regularizers.l2(1e-5))(x)
+        model = keras.models.Model(inputs=inputs, outputs=x)
+        return model
+
+    def _blocks(filters, count):
+        def _layers(x):
+            for _ in range(count):
+                sc = x
+                x = _conv2d(filters, use_act=True)(x)
+                x = _conv2d(filters, use_act=False)(x)
+                x = keras.layers.add([sc, x])
+            x = _bn_act()(x)
+            return x
+        return _layers
+
+    def _conv2d(filters, kernel_size=3, strides=1, use_act=True):
+        def _layers(x):
+            x = keras.layers.Conv2D(filters, kernel_size=kernel_size, strides=strides,
+                                    padding='same', use_bias=False,
+                                    kernel_initializer='he_uniform',
+                                    kernel_regularizer=keras.regularizers.l2(1e-5))(x)
+            x = _bn_act(use_act=use_act)(x)
+            return x
+        return _layers
+
+    def _bn_act(use_act=True):
+        def _layers(x):
+            x = keras.layers.BatchNormalization(gamma_regularizer=keras.regularizers.l2(1e-5))(x)
+            x = keras.layers.Activation('relu')(x) if use_act else x
+            return x
+        return _layers
+
+    return _create()
+
+
+def _create_network_vgg10(input_shape, num_classes):
+    """ネットワークを作成して返す。(VGG風10層)"""
+    def _create():
+        inputs = x = keras.layers.Input(input_shape)
+        x = _conv2d(128)(x)
+        x = _conv2d(128)(x)
+        x = _conv2d(128)(x)
+        x = keras.layers.MaxPooling2D()(x)
+        x = _conv2d(256)(x)
+        x = _conv2d(256)(x)
+        x = _conv2d(256)(x)
+        x = keras.layers.MaxPooling2D()(x)
+        x = _conv2d(512)(x)
+        x = _conv2d(512)(x)
+        x = _conv2d(512)(x)
+        x = keras.layers.GlobalAveragePooling2D()(x)
+        x = keras.layers.Dense(num_classes, activation='softmax',
+                               kernel_regularizer=keras.regularizers.l2(1e-5),
+                               bias_regularizer=keras.regularizers.l2(1e-5))(x)
+        model = keras.models.Model(inputs=inputs, outputs=x)
+        return model
+
+    def _conv2d(filters):
+        def _layers(x):
+            x = keras.layers.Conv2D(filters, kernel_size=3,
+                                    padding='same', use_bias=False,
+                                    kernel_initializer='he_uniform',
+                                    kernel_regularizer=keras.regularizers.l2(1e-5))(x)
+            x = keras.layers.BatchNormalization(gamma_regularizer=keras.regularizers.l2(1e-5))(x)
+            x = keras.layers.Activation('relu')(x)
+            return x
+        return _layers
+
+    return _create()
 
 
 class MixFeat(keras.layers.Layer):
@@ -272,7 +369,6 @@ def _generate_instance(X, y, aug1, aug2, num_classes, data_augmentation, index):
         c_i = (c_i * r + c_t * (1 - r)).astype(np.float32)
 
     X_i = aug2(image=X_i)['image']
-
     return X_i, c_i
 
 

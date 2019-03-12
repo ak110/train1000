@@ -8,25 +8,25 @@ Kerasを使って1ファイルで全て実装したので、初心者にもわ�
 
 とりあえずCIFAR-10だけお試し中。(各1回しかやってないのであまり確かな値ではないです。)
 
-### `train.py`
+```txt
+[INFO ] Arguments: --data=cifar10 --model=default
+[INFO ] Test Accuracy:      0.7712
+[INFO ] Test Cross Entropy: 0.7951
+```
 
 ```txt
-[INFO ] Arguments: --data=cifar10
-[INFO ] Test Accuracy:      0.7696
-[INFO ] Test Cross Entropy: 0.7939
+[INFO ] Arguments: --data=cifar10 --model=resnet25
+[INFO ] Test Accuracy:      0.7671
+[INFO ] Test Cross Entropy: 0.7960
+```
+
+```txt
+[INFO ] Arguments: --data=cifar10 --model=vgg10
+[INFO ] Test Accuracy:      0.7381
+[INFO ] Test Cross Entropy: 0.9095
 ```
 
 PGP <https://arxiv.org/abs/1803.11370> を使ったりEpoch数を増やしたりするともうちょっと伸びるけど重いので廃止してしまった。
-
-### `train-light.py` (軽量版)
-
-```txt
-[INFO ] Arguments: --data=cifar10
-[INFO ] Test Accuracy:      0.7612
-[INFO ] Test Cross Entropy: 0.7967
-```
-
-実験など用。
 
 ## 動かすために必要なもの
 
