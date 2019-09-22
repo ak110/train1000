@@ -1,5 +1,7 @@
 # Train with 1000
 
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
 訓練データを1000件だけ使って学習してみる試み、[Train with 1000](http://www.ok.sc.e.titech.ac.jp/~mtanaka/proj/train1000/)をやってみたコード。
 
 Kerasを使って1ファイルで全て実装したので、初心者にもわかりやすいコードになってます！ (嘘)
