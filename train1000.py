@@ -9,7 +9,6 @@ import random
 import albumentations as A
 import cv2
 import horovod.tensorflow.keras as hvd
-import joblib
 import numpy as np
 import sklearn.metrics
 import tensorflow as tf
@@ -69,18 +68,16 @@ def _main():
 
         # categorical crossentropy
         log_p = logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True)
-        loss = -tf.keras.backend.sum(y_true * log_p, axis=-1)
+        loss = -tf.math.reduce_sum(y_true * log_p, axis=-1)
 
         # Label smoothing <https://myrtle.ai/how-to-train-your-resnet-8-bag-of-tricks/>
         label_smoothing = 0.2
-        kl = -tf.keras.backend.mean(log_p, axis=-1)
+        kl = -tf.math.reduce_mean(log_p, axis=-1)
         loss = (1 - label_smoothing) * loss + label_smoothing * kl
 
         return loss
 
-    model.compile(
-        optimizer, loss, metrics=["acc", "mae"], experimental_run_tf_function=False
-    )
+    model.compile(optimizer, loss, metrics=["acc"], experimental_run_tf_function=False)
     model.summary(print_fn=logger.info if hvd.rank() == 0 else lambda x: x)
     try:
         tf.keras.utils.plot_model(
@@ -106,7 +103,7 @@ def _main():
         validation_freq=100,
         epochs=epochs,
         callbacks=[
-            _cosine_annealing_callback(base_lr, epochs),
+            _cosine_annealing_callback(base_lr, epochs, warmup_epochs=10),
             hvd.callbacks.BroadcastGlobalVariablesCallback(0),
             hvd.callbacks.MetricAverageCallback(),
         ],
@@ -152,7 +149,7 @@ def _main():
                 batch_size,
                 num_classes,
             ),
-            steps=int(np.ceil(len(X_test) / batch_size)),
+            steps=-(-len(X_test) // batch_size),
             verbose=1 if hvd.rank() == 0 else 0,
         )
         acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
@@ -250,13 +247,15 @@ def _create_network(input_shape, num_classes):
     return model
 
 
-def _cosine_annealing_callback(base_lr, epochs, warmup_epochs=5):
+def _cosine_annealing_callback(base_lr, epochs, warmup_epochs):
     """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
 
     def _cosine_annealing(ep, lr):
         del lr
+        # linear learning rate warmup <https://arxiv.org/abs/1706.02677>
         if ep + 1 < warmup_epochs:
             return base_lr * (ep + 1) / warmup_epochs
+        # cosine annealing <https://arxiv.org/abs/1608.03983>
         min_lr = base_lr * 0.01
         return min_lr + 0.5 * (base_lr - min_lr) * (
             1 + np.cos(np.pi * (ep + 1) / epochs)
@@ -290,9 +289,9 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
                 A.HorizontalFlip(p=0.5),
                 RandomCompose(
                     [
-                        A.Equalize(mode="pil", by_channels=True, p=0.0625),
-                        A.Equalize(mode="pil", by_channels=False, p=0.0625),
-                        A.CLAHE(p=0.0625),
+                        A.Equalize(mode="pil", by_channels=True, p=0.125),
+                        A.Equalize(mode="pil", by_channels=False, p=0.125),
+                        A.CLAHE(p=0.125),
                         A.RandomBrightnessContrast(brightness_by_max=True, p=0.5),
                         A.HueSaturationValue(val_shift_limit=0, p=0.5),
                         A.Posterize(num_bits=(4, 7), p=0.0625),
@@ -325,80 +324,55 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
         aug1 = A.Compose([])
         aug2 = A.Compose([])
 
-    with joblib.Parallel(backend="threading", n_jobs=batch_size) as parallel:
-        if shuffle:
-            batch_indices = []
-            for index in _generate_shuffled_indices(len(X)):
-                batch_indices.append(index)
-                if len(batch_indices) == batch_size:
-                    yield _generate_batch(
-                        X,
-                        y,
-                        aug1,
-                        aug2,
-                        num_classes,
-                        data_augmentation,
-                        batch_indices,
-                        parallel,
-                    )
-                    batch_indices = []
-        else:
-            while True:
-                for i in range(0, len(X), batch_size):
-                    batch_indices = range(i, min(i + batch_size, len(X)))
-                    yield _generate_batch(
-                        X,
-                        y,
-                        aug1,
-                        aug2,
-                        num_classes,
-                        data_augmentation,
-                        batch_indices,
-                        parallel,
-                    )
+    def do_aug1(img, aug1=aug1):
+        return aug1(image=img.numpy())["image"].astype(np.float32)
 
+    def do_aug2(img, aug2=aug2):
+        return aug2(image=img.numpy())["image"].astype(np.float32)
 
-def _generate_shuffled_indices(data_count):
-    """シャッフルしたindexを無限に返すgenerator。"""
-    all_indices = np.arange(data_count)
-    while True:
-        random.shuffle(all_indices)
-        yield from all_indices
+    def process1(X, y, do_aug1=do_aug1):
+        X = tf.py_function(do_aug1, inp=[X], Tout=tf.float32)
+        X = tf.ensure_shape(X, (None, None, 3))
+        X = X / 127.5 - 1
+        y = tf.one_hot(y, num_classes)
+        return X, y
 
+    def process2(X, y, do_aug2=do_aug2):
+        return tf.py_function(do_aug2, inp=[X], Tout=tf.float32), y
 
-def _generate_batch(
-    X, y, aug1, aug2, num_classes, data_augmentation, batch_indices, parallel
-):
-    """1バッチずつの処理。"""
-    jobs = [
-        _generate_instance(X, y, aug1, aug2, num_classes, data_augmentation, i)
-        for i in batch_indices
-    ]
-    results = parallel(jobs)
-    X_batch, y_batch = zip(*results)
-    return np.array(X_batch), np.array(y_batch)
-
-
-@joblib.delayed
-def _generate_instance(X, y, aug1, aug2, num_classes, data_augmentation, index):
-    """1サンプルずつの処理。"""
-    X_i, y_i = X[index], y[index]
-    X_i = aug1(image=X_i)["image"]
-    c_i = tf.keras.utils.to_categorical(y_i, num_classes)
-
+    ds = tf.data.Dataset.from_tensor_slices((X, y))
     if data_augmentation == "train":
-        # mixup
-        t = random.choice(range(len(y)))
-        X_t, y_t = X[t], y[t]
-        X_t = aug1(image=X_t)["image"]
-        c_t = tf.keras.utils.to_categorical(y_t, num_classes)
-        r = random.uniform(0.5, 1.0)
-        X_i = X_i.astype(np.float32) * r + X_t.astype(np.float32) * (1 - r)
-        c_i = c_i.astype(np.float32) * r + c_t.astype(np.float32) * (1 - r)
+        assert shuffle
+        ds = mixup(ds, process1, process2)
+    else:
+        ds = ds.shuffle(buffer_size=len(X)) if shuffle else ds
+        ds = ds.map(process1, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    ds = ds.repeat() if shuffle else ds  # シャッフル時はバッチサイズを固定するため先にrepeat
+    ds = ds.batch(batch_size)
+    ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+    return ds
 
-    X_i = aug2(image=X_i)["image"]
-    X_i = X_i.astype(np.float32) / 127.5 - 1
-    return X_i, c_i
+
+def mixup(ds, premix_fn, postmix_fn):
+    """mixup: <https://arxiv.org/abs/1710.09412>"""
+
+    def mixup_fn(data1, data2):
+        X1, y1 = data1
+        X2, y2 = data2
+        r = tf.random.uniform((), 0, 1)
+        X = X1 * r + X2 * (1 - r)
+        y = y1 * r + y2 * (1 - r)
+        return X, y
+
+    data_count = tf.data.experimental.cardinality(ds)
+    ds1 = ds.shuffle(buffer_size=data_count, seed=1)
+    ds2 = ds.shuffle(buffer_size=data_count, seed=2)
+    ds1 = ds1.map(premix_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    ds2 = ds2.map(premix_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    ds = tf.data.Dataset.zip((ds1, ds2))
+    ds = ds.map(mixup_fn)
+    ds = ds.map(postmix_fn)
+    return ds
 
 
 class RandomCompose(A.Compose):
@@ -436,7 +410,12 @@ class RandomErasing(A.ImageOnlyTransform):  # pylint: disable=abstract-method
             ey = random.randint(0, img.shape[0] - eh - 1)
 
             img = np.copy(img)
-            rc = np.array([random.randint(0, 255) for _ in range(img.shape[-1])])
+            if img.dtype == np.float32:
+                rc = np.array([random.uniform(0, 1) for _ in range(img.shape[-1])])
+            elif img.dtype == np.uint8:
+                rc = np.array([random.randint(0, 255) for _ in range(img.shape[-1])])
+            else:
+                raise ValueError(f"dtype error: {img.dtype}")
             if self.alpha:
                 img[ey : ey + eh, ex : ex + ew, :] = (
                     img[ey : ey + eh, ex : ex + ew, :] * (1 - self.alpha)
