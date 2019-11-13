@@ -10,8 +10,8 @@ tf.kerasを使って1ファイルで全て実装したので、初心者にも�
 
 ```txt
 [INFO ] Arguments: --data=cifar10
-[INFO ] Test Accuracy:      0.7870
-[INFO ] Test Cross Entropy: 0.7971
+[INFO ] Test Accuracy:      0.7970
+[INFO ] Test Cross Entropy: 0.7814
 ```
 
 ## 動かすために必要なもの
@@ -20,8 +20,9 @@ tf.kerasを使って1ファイルで全て実装したので、初心者にも�
 - Horovod
 - OpenMPI (複数GPU時)
 - albumentations
-- opencv-python
 - scikit-learn
+- pydot
+- scipy
 
 ## やってること
 

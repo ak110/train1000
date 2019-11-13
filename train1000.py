@@ -10,6 +10,7 @@ import albumentations as A
 import cv2
 import horovod.tensorflow.keras as hvd
 import numpy as np
+import scipy
 import sklearn.metrics
 import tensorflow as tf
 
@@ -54,7 +55,8 @@ def _main():
 
     (X_train, y_train), (X_test, y_test), num_classes = _load_data(args.data)
 
-    epochs = 5 if args.check else 1800
+    epochs = 2 if args.check else 1800
+    refine_epoch = 2 if args.check else 50
     batch_size = 64
     base_lr = 1e-3 * batch_size * hvd.size()
 
@@ -62,19 +64,15 @@ def _main():
     optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
 
-    def loss(y_true, y_pred):
-        del y_pred
-        logits = model.get_layer("logits").output
-
+    @tf.function
+    def loss(y_true, logits):
         # categorical crossentropy
         log_p = logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True)
         loss = -tf.math.reduce_sum(y_true * log_p, axis=-1)
-
         # Label smoothing <https://myrtle.ai/how-to-train-your-resnet-8-bag-of-tricks/>
         label_smoothing = 0.2
         kl = -tf.math.reduce_mean(log_p, axis=-1)
         loss = (1 - label_smoothing) * loss + label_smoothing * kl
-
         return loss
 
     model.compile(optimizer, loss, metrics=["acc"], experimental_run_tf_function=False)
@@ -103,7 +101,7 @@ def _main():
         validation_freq=100,
         epochs=epochs,
         callbacks=[
-            _cosine_annealing_callback(base_lr, epochs, warmup_epochs=10),
+            _cosine_annealing_callback(base_lr, epochs),
             hvd.callbacks.BroadcastGlobalVariablesCallback(0),
             hvd.callbacks.MetricAverageCallback(),
         ],
@@ -132,7 +130,7 @@ def _main():
         ),
         validation_steps=-(-len(X_test) * 3 // (batch_size * hvd.size())),
         validation_freq=10,
-        epochs=50,
+        epochs=refine_epoch,
         callbacks=[
             hvd.callbacks.BroadcastGlobalVariablesCallback(0),
             hvd.callbacks.MetricAverageCallback(),
@@ -153,7 +151,7 @@ def _main():
             verbose=1 if hvd.rank() == 0 else 0,
         )
         acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
-        ce = sklearn.metrics.log_loss(y_test, pred_test)
+        ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test))
         logger.info(f"Arguments: --data={args.data}")
         logger.info(f"Test Accuracy:      {acc:.4f}")
         logger.info(f"Test Cross Entropy: {ce:.4f}")
@@ -240,26 +238,24 @@ def _create_network(input_shape, num_classes):
     x = blocks(512, 8)(x)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dense(
-        num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4), name="logits"
+        num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4)
     )(x)
-    x = tf.keras.layers.Activation(activation="softmax")(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
     return model
 
 
-def _cosine_annealing_callback(base_lr, epochs, warmup_epochs):
+def _cosine_annealing_callback(base_lr, epochs, warmup_epochs=5):
     """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
 
     def _cosine_annealing(ep, lr):
         del lr
-        # linear learning rate warmup <https://arxiv.org/abs/1706.02677>
-        if ep + 1 < warmup_epochs:
-            return base_lr * (ep + 1) / warmup_epochs
         # cosine annealing <https://arxiv.org/abs/1608.03983>
         min_lr = base_lr * 0.01
-        return min_lr + 0.5 * (base_lr - min_lr) * (
-            1 + np.cos(np.pi * (ep + 1) / epochs)
-        )
+        lr = min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * (ep + 1) / epochs))
+        # linear learning rate warmup <https://arxiv.org/abs/1706.02677>
+        if ep + 1 < warmup_epochs:
+            lr = lr * (ep + 1) / warmup_epochs
+        return lr
 
     return tf.keras.callbacks.LearningRateScheduler(_cosine_annealing)
 
@@ -269,24 +265,7 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
     if data_augmentation == "train":
         aug1 = A.Compose(
             [
-                A.Rotate(
-                    15,
-                    interpolation=cv2.INTER_LANCZOS4,
-                    border_mode=cv2.BORDER_REPLICATE,
-                    p=0.25,
-                ),
-                A.PadIfNeeded(40, 40, border_mode=cv2.BORDER_REPLICATE, p=1),
-                A.OneOf(
-                    [
-                        A.RandomScale((0.875, 1), interpolation=cv2.INTER_AREA, p=0.25),
-                        A.RandomScale(
-                            (1, 1.125), interpolation=cv2.INTER_LANCZOS4, p=0.25
-                        ),
-                    ],
-                    p=0.25,
-                ),
-                A.RandomCrop(32, 32, p=1),
-                A.HorizontalFlip(p=0.5),
+                RandomTransform((32, 32), p=1),
                 RandomCompose(
                     [
                         A.Equalize(mode="pil", by_channels=True, p=0.125),
@@ -294,8 +273,8 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
                         A.CLAHE(p=0.125),
                         A.RandomBrightnessContrast(brightness_by_max=True, p=0.5),
                         A.HueSaturationValue(val_shift_limit=0, p=0.5),
-                        A.Posterize(num_bits=(4, 7), p=0.0625),
-                        A.Solarize(threshold=(50, 255 - 50), p=0.0625),
+                        A.Posterize(num_bits=(4, 7), p=0.125),
+                        A.Solarize(threshold=(50, 255 - 50), p=0.125),
                         A.Blur(blur_limit=1, p=0.125),
                         A.IAASharpen(alpha=(0, 0.5), p=0.125),
                         A.IAAEmboss(alpha=(0, 0.5), p=0.125),
@@ -312,33 +291,27 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
         )
         aug2 = RandomErasing(p=0.5)
     elif data_augmentation == "refine":
-        aug1 = A.Compose(
-            [
-                A.PadIfNeeded(40, 40, border_mode=cv2.BORDER_REPLICATE, p=1),
-                A.RandomCrop(32, 32, p=1),
-                A.HorizontalFlip(p=0.5),
-            ]
-        )
+        aug1 = RandomTransform.create_refine((32, 32))
         aug2 = A.Compose([])
     else:
         aug1 = A.Compose([])
         aug2 = A.Compose([])
 
-    def do_aug1(img, aug1=aug1):
-        return aug1(image=img.numpy())["image"].astype(np.float32)
+    def do_aug1(img):
+        return aug1(image=img)["image"].astype(np.float32)
 
-    def do_aug2(img, aug2=aug2):
-        return aug2(image=img.numpy())["image"].astype(np.float32)
+    def do_aug2(img):
+        return aug2(image=img)["image"].astype(np.float32)
 
-    def process1(X, y, do_aug1=do_aug1):
-        X = tf.py_function(do_aug1, inp=[X], Tout=tf.float32)
-        X = tf.ensure_shape(X, (None, None, 3))
+    def process1(X, y):
+        X = tf.numpy_function(do_aug1, inp=[X], Tout=tf.float32)
         X = X / 127.5 - 1
         y = tf.one_hot(y, num_classes)
         return X, y
 
-    def process2(X, y, do_aug2=do_aug2):
-        return tf.py_function(do_aug2, inp=[X], Tout=tf.float32), y
+    def process2(X, y):
+        X = tf.numpy_function(do_aug2, inp=[X], Tout=tf.float32)
+        return X, y
 
     ds = tf.data.Dataset.from_tensor_slices((X, y))
     if data_augmentation == "train":
@@ -365,8 +338,8 @@ def mixup(ds, premix_fn, postmix_fn):
         return X, y
 
     data_count = tf.data.experimental.cardinality(ds)
-    ds1 = ds.shuffle(buffer_size=data_count, seed=1)
-    ds2 = ds.shuffle(buffer_size=data_count, seed=2)
+    ds1 = ds.shuffle(buffer_size=data_count)
+    ds2 = ds.shuffle(buffer_size=data_count)
     ds1 = ds1.map(premix_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     ds2 = ds2.map(premix_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     ds = tf.data.Dataset.zip((ds1, ds2))
@@ -386,6 +359,207 @@ class RandomCompose(A.Compose):
             return super().__call__(force_apply=force_apply, **data)
         finally:
             self.transforms.transforms = backup
+
+
+class RandomTransform(A.DualTransform):
+    """Flip, Scale, Resize, Rotateをまとめて処理。
+
+    Args:
+        size: 出力サイズ(h, w)
+
+    """
+
+    @classmethod
+    def create_refine(
+        cls,
+        size: tuple,
+        flip: tuple = (True, False),
+        translate: tuple = (0.0625, 0.0625),
+        border_mode: str = "edge",
+        always_apply: bool = False,
+        p: float = 1.0,
+    ):
+        """Refined Data Augmentation <https://arxiv.org/abs/1909.09148> 用の控えめバージョンを作成する。"""
+        return cls(
+            size=size,
+            flip=flip,
+            translate=translate,
+            border_mode=border_mode,
+            scale_prob=0.0,
+            aspect_prob=0.0,
+            rotate_prob=0.0,
+            always_apply=always_apply,
+            p=p,
+        )
+
+    def __init__(
+        self,
+        size,
+        flip: tuple = (True, False),
+        translate: tuple = (0.125, 0.125),
+        scale_prob: float = 0.5,
+        scale_range: tuple = (2 / 3, 3 / 2),
+        base_scale: float = 1.0,
+        aspect_prob: float = 0.5,
+        aspect_range: tuple = (3 / 4, 4 / 3),
+        rotate_prob: float = 0.25,
+        rotate_range: tuple = (-15, +15),
+        border_mode: str = "edge",
+        always_apply: bool = False,
+        p: float = 1.0,
+    ):
+        super().__init__(always_apply=always_apply, p=p)
+        self.size = size
+        self.flip = flip
+        self.translate = translate
+        self.scale_prob = scale_prob
+        self.base_scale = base_scale
+        self.scale_range = scale_range
+        self.aspect_prob = aspect_prob
+        self.aspect_range = aspect_range
+        self.rotate_prob = rotate_prob
+        self.rotate_range = rotate_range
+        self.border_mode = border_mode
+
+    def apply(self, image, m, interp=None, **params):
+        # pylint: disable=arguments-differ
+        cv2_border = {
+            "edge": cv2.BORDER_REPLICATE,
+            "reflect": cv2.BORDER_REFLECT_101,
+            "wrap": cv2.BORDER_WRAP,
+        }[self.border_mode]
+
+        if interp == "nearest":
+            cv2_interp = cv2.INTER_NEAREST
+        else:
+            # 縮小ならINTER_AREA, 拡大ならINTER_LANCZOS4
+            sh, sw = image.shape[:2]
+            dr = self.apply_to_keypoint([(0, 0), (sw, 0), (sw, sh), (0, sh)], m)
+            dw = min(np.linalg.norm(dr[1] - dr[0]), np.linalg.norm(dr[2] - dr[3]))
+            dh = min(np.linalg.norm(dr[3] - dr[0]), np.linalg.norm(dr[2] - dr[1]))
+            cv2_interp = cv2.INTER_AREA if dw <= sw or dh <= sh else cv2.INTER_LANCZOS4
+
+        if image.ndim == 2 or image.shape[-1] in (1, 3):
+            image = cv2.warpPerspective(
+                image, m, self.size[::-1], flags=cv2_interp, borderMode=cv2_border
+            )
+            if image.ndim == 2:
+                image = np.expand_dims(image, axis=-1)
+        else:
+            resized_list = [
+                cv2.warpPerspective(
+                    image[:, :, ch],
+                    m,
+                    self.size[::-1],
+                    flags=cv2_interp,
+                    borderMode=cv2_border,
+                )
+                for ch in range(image.shape[-1])
+            ]
+            image = np.transpose(resized_list, (1, 2, 0))
+        return image
+
+    def apply_to_bbox(self, bbox, m, **params):
+        # pylint: disable=arguments-differ
+        del params
+        bbox = np.asarray(bbox)
+        return cv2.perspectiveTransform(
+            np.reshape(bbox, (-1, 1, 2)).astype(np.float32), m
+        ).reshape(bbox.shape)
+
+    def apply_to_keypoint(self, keypoint, m, **params):
+        # pylint: disable=arguments-differ
+        del params
+        keypoint = np.asarray(keypoint)
+        return cv2.perspectiveTransform(
+            np.reshape(keypoint, (-1, 1, 2)).astype(np.float32), m
+        ).reshape(keypoint.shape)
+
+    def apply_to_mask(self, img, interp=None, **params):
+        # pylint: disable=arguments-differ
+        del interp
+        return self.apply(img, interp="nearest", **params)
+
+    def get_params_dependent_on_targets(self, params):
+        image = params["image"]
+        scale = (
+            self.base_scale
+            * np.exp(
+                random.uniform(np.log(self.scale_range[0]), np.log(self.scale_range[1]))
+            )
+            if random.random() <= self.scale_prob
+            else self.base_scale
+        )
+        ar = (
+            np.exp(
+                random.uniform(
+                    np.log(self.aspect_range[0]), np.log(self.aspect_range[1])
+                )
+            )
+            if random.random() <= self.aspect_prob
+            else 1.0
+        )
+
+        flip_h = self.flip[0] and random.random() <= 0.5
+        flip_v = self.flip[1] and random.random() <= 0.5
+        scale_h = scale * np.sqrt(ar)
+        scale_v = scale / np.sqrt(ar)
+        degrees = (
+            random.uniform(self.rotate_range[0], self.rotate_range[1])
+            if random.random() <= self.rotate_prob
+            else 0
+        )
+        pos_h = random.uniform(0, 1)
+        pos_v = random.uniform(0, 1)
+        translate_h = random.uniform(-self.translate[0], self.translate[0])
+        translate_v = random.uniform(-self.translate[1], self.translate[1])
+        # 左上から時計回りに座標を用意
+        src_points = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
+        dst_points = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
+        # 反転
+        if flip_h:
+            dst_points = dst_points[[1, 0, 3, 2]]
+        if flip_v:
+            dst_points = dst_points[[3, 2, 1, 0]]
+        # 移動
+        src_points[:, 0] -= translate_h
+        src_points[:, 1] -= translate_v
+        # 回転
+        theta = degrees * np.pi * 2 / 360
+        c, s = np.cos(theta), np.sin(theta)
+        r = np.array([[c, -s], [s, c]], dtype=np.float32)
+        src_points = np.dot(r, (src_points - 0.5).T).T + 0.5
+        # スケール変換
+        src_points[:, 0] /= scale_h
+        src_points[:, 1] /= scale_v
+        src_points[:, 0] -= (1 / scale_h - 1) * pos_h
+        src_points[:, 1] -= (1 / scale_v - 1) * pos_v
+        # 変換行列の作成
+        src_points[:, 0] *= image.shape[1]
+        src_points[:, 1] *= image.shape[0]
+        dst_points[:, 0] *= self.size[1]
+        dst_points[:, 1] *= self.size[0]
+        m = cv2.getPerspectiveTransform(src_points, dst_points)
+        return {"m": m}
+
+    @property
+    def targets_as_params(self):
+        return ["image"]
+
+    def get_transform_init_args_names(self):
+        return (
+            "size",
+            "flip",
+            "translate",
+            "scale_prob",
+            "scale_range",
+            "base_scale",
+            "aspect_prob",
+            "aspect_range",
+            "rotate_prob",
+            "rotate_range",
+            "border_mode",
+        )
 
 
 class RandomErasing(A.ImageOnlyTransform):  # pylint: disable=abstract-method
