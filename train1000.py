@@ -101,7 +101,7 @@ def _main():
         validation_freq=100,
         epochs=epochs,
         callbacks=[
-            _cosine_annealing_callback(base_lr, epochs),
+            CosineAnnealing(),
             hvd.callbacks.BroadcastGlobalVariablesCallback(0),
             hvd.callbacks.MetricAverageCallback(),
         ],
@@ -151,7 +151,7 @@ def _main():
             verbose=1 if hvd.rank() == 0 else 0,
         )
         acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
-        ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test))
+        ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test, axis=-1))
         logger.info(f"Arguments: --data={args.data}")
         logger.info(f"Test Accuracy:      {acc:.4f}")
         logger.info(f"Test Cross Entropy: {ce:.4f}")
@@ -244,22 +244,6 @@ def _create_network(input_shape, num_classes):
     return model
 
 
-def _cosine_annealing_callback(base_lr, epochs, warmup_epochs=5):
-    """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
-
-    def _cosine_annealing(ep, lr):
-        del lr
-        # cosine annealing <https://arxiv.org/abs/1608.03983>
-        min_lr = base_lr * 0.01
-        lr = min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * (ep + 1) / epochs))
-        # linear learning rate warmup <https://arxiv.org/abs/1706.02677>
-        if ep + 1 < warmup_epochs:
-            lr = lr * (ep + 1) / warmup_epochs
-        return lr
-
-    return tf.keras.callbacks.LearningRateScheduler(_cosine_annealing)
-
-
 def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="test"):
     """generator。"""
     if data_augmentation == "train":
@@ -346,6 +330,47 @@ def mixup(ds, premix_fn, postmix_fn):
     ds = ds.map(mixup_fn)
     ds = ds.map(postmix_fn)
     return ds
+
+
+class CosineAnnealing(tf.keras.callbacks.Callback):
+    """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
+
+    def __init__(self, factor=0.01, warmup_epochs=5):
+        super().__init__()
+        self.factor = factor
+        self.warmup_epochs = warmup_epochs
+        self.lr = None
+
+    def on_train_begin(self, logs=None):
+        del logs
+        if not hasattr(self.model.optimizer, "lr"):
+            raise ValueError('Optimizer must have a "lr" attribute.')
+        self.lr = tf.keras.backend.get_value(self.model.optimizer.lr)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        del logs
+        if epoch + 1 < self.warmup_epochs:
+            # linear learning rate warmup <https://arxiv.org/abs/1706.02677>
+            lr = self.lr * (epoch + 1) / self.warmup_epochs
+        else:
+            # cosine annealing <https://arxiv.org/abs/1608.03983>
+            min_lr = self.lr * self.factor
+            lr = min_lr + 0.5 * (self.lr - min_lr) * (
+                1 + np.cos(np.pi * (epoch + 1) / self.params["epochs"])
+            )
+        tf.keras.backend.set_value(self.model.optimizer.lr, lr)
+        # warmup後はmomentumをクリアしてみる
+        # https://twitter.com/ak11/status/1194763993082023936
+        if 2 <= epoch + 1 <= self.warmup_epochs:
+            # 手抜き: SGD前提で無条件に全部ゼロ埋め
+            self.model.optimizer.set_weights(
+                [np.zeros_like(w) for w in self.model.optimizer.get_weights()]
+            )
+
+    def on_epoch_end(self, epoch, logs=None):
+        del epoch
+        logs = logs or {}
+        logs["lr"] = tf.keras.backend.get_value(self.model.optimizer.lr)
 
 
 class RandomCompose(A.Compose):
