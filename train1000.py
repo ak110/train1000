@@ -282,19 +282,20 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
         aug2 = A.Compose([])
 
     def do_aug1(img):
-        return aug1(image=img)["image"].astype(np.float32)
+        return aug1(image=img)["image"]
 
     def do_aug2(img):
-        return aug2(image=img)["image"].astype(np.float32)
+        return aug2(image=img)["image"]
 
     def process1(X, y):
-        X = tf.numpy_function(do_aug1, inp=[X], Tout=tf.float32)
-        X = X / 127.5 - 1
-        y = tf.one_hot(y, num_classes)
+        X = tf.numpy_function(do_aug1, inp=[X], Tout=tf.uint8)
+        X = tf.cast(X, tf.float32)
+        y = tf.one_hot(y, num_classes, dtype=tf.float32)
         return X, y
 
     def process2(X, y):
         X = tf.numpy_function(do_aug2, inp=[X], Tout=tf.float32)
+        X = X / 127.5 - 1
         return X, y
 
     ds = tf.data.Dataset.from_tensor_slices((X, y))
@@ -304,6 +305,7 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
     else:
         ds = ds.shuffle(buffer_size=len(X)) if shuffle else ds
         ds = ds.map(process1, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        ds = ds.map(process2)
     ds = ds.repeat() if shuffle else ds  # シャッフル時はバッチサイズを固定するため先にrepeat
     ds = ds.batch(batch_size)
     ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
@@ -609,12 +611,7 @@ class RandomErasing(A.ImageOnlyTransform):  # pylint: disable=abstract-method
             ey = random.randint(0, img.shape[0] - eh - 1)
 
             img = np.copy(img)
-            if img.dtype == np.float32:
-                rc = np.array([random.uniform(0, 1) for _ in range(img.shape[-1])])
-            elif img.dtype == np.uint8:
-                rc = np.array([random.randint(0, 255) for _ in range(img.shape[-1])])
-            else:
-                raise ValueError(f"dtype error: {img.dtype}")
+            rc = np.array([random.randint(0, 255) for _ in range(img.shape[-1])])
             if self.alpha:
                 img[ey : ey + eh, ex : ex + ew, :] = (
                     img[ey : ey + eh, ex : ex + ew, :] * (1 - self.alpha)
