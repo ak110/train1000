@@ -20,7 +20,7 @@ def _main():
         import better_exceptions
 
         better_exceptions.hook()
-    except BaseException:
+    except Exception:
         pass
 
     parser = argparse.ArgumentParser()
@@ -53,14 +53,14 @@ def _main():
     )
     logger = logging.getLogger(__name__)
 
-    (X_train, y_train), (X_test, y_test), num_classes = _load_data(args.data)
+    (X_train, y_train), (X_test, y_test), num_classes = load_data(args.data)
 
     epochs = 2 if args.check else 1800
     refine_epoch = 2 if args.check else 50
     batch_size = 64
     base_lr = 1e-3 * batch_size * hvd.size()
 
-    model = _create_network(X_train.shape[1:], num_classes)
+    model = create_network(X_train.shape[1:], num_classes)
     optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
 
@@ -85,16 +85,11 @@ def _main():
         pass
 
     model.fit(
-        _generate(
-            X_train,
-            y_train,
-            batch_size,
-            num_classes,
-            shuffle=True,
-            data_augmentation="train",
+        create_dataset(
+            X_train, y_train, batch_size, num_classes, shuffle=True, mode="train",
         ),
         steps_per_epoch=-(-len(X_train) // (batch_size * hvd.size())),
-        validation_data=_generate(
+        validation_data=create_dataset(
             X_test, y_test, batch_size, num_classes, shuffle=True
         ),
         validation_steps=-(-len(X_test) * 3 // (batch_size * hvd.size())),
@@ -116,16 +111,11 @@ def _main():
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
     model.compile(optimizer, loss, metrics=["acc"], experimental_run_tf_function=False)
     model.fit(
-        _generate(
-            X_train,
-            y_train,
-            batch_size,
-            num_classes,
-            shuffle=True,
-            data_augmentation="refine",
+        create_dataset(
+            X_train, y_train, batch_size, num_classes, shuffle=True, mode="refine",
         ),
         steps_per_epoch=-(-len(X_train) // (batch_size * hvd.size())),
-        validation_data=_generate(
+        validation_data=create_dataset(
             X_test, y_test, batch_size, num_classes, shuffle=True
         ),
         validation_steps=-(-len(X_test) * 3 // (batch_size * hvd.size())),
@@ -141,7 +131,7 @@ def _main():
     if hvd.rank() == 0:
         # 検証
         pred_test = model.predict(
-            _generate(
+            create_dataset(
                 X_test,
                 np.zeros((len(X_test),), dtype=np.int32),
                 batch_size,
@@ -159,7 +149,7 @@ def _main():
         model.save(args.results_dir / f"{args.data}.h5", include_optimizer=False)
 
 
-def _load_data(data):
+def load_data(data):
     """データの読み込み。"""
     (X_train, y_train), (X_test, y_test) = {
         "mnist": tf.keras.datasets.mnist.load_data,
@@ -170,11 +160,11 @@ def _load_data(data):
     y_train = np.squeeze(y_train)
     y_test = np.squeeze(y_test)
     num_classes = len(np.unique(y_train))
-    X_train, y_train = _extract1000(X_train, y_train, num_classes=num_classes)
+    X_train, y_train = extract1000(X_train, y_train, num_classes=num_classes)
     return (X_train, y_train), (X_test, y_test), num_classes
 
 
-def _extract1000(X, y, num_classes):
+def extract1000(X, y, num_classes):
     """https://github.com/mastnk/train1000 を参考にクラスごとに均等に先頭から取得する処理。"""
     num_data = 1000
     num_per_class = num_data // num_classes
@@ -187,7 +177,7 @@ def _extract1000(X, y, num_classes):
     return X[index_list], y[index_list]
 
 
-def _create_network(input_shape, num_classes):
+def create_network(input_shape, num_classes):
     """ネットワークを作成して返す。"""
     conv2d = functools.partial(
         tf.keras.layers.Conv2D,
@@ -203,16 +193,11 @@ def _create_network(input_shape, num_classes):
     )
     act = functools.partial(tf.keras.layers.Activation, "relu")
 
-    def down(filters):
+    def blocks(filters, count, down=True):
         def layers(x):
-            x = conv2d(filters, kernel_size=4, strides=2)(x)
-            x = bn()(x)
-            return x
-
-        return layers
-
-    def blocks(filters, count):
-        def layers(x):
+            if down:
+                x = conv2d(filters, kernel_size=4, strides=2)(x)
+                x = bn()(x)
             for _ in range(count):
                 sc = x
                 x = conv2d(filters)(x)
@@ -231,10 +216,8 @@ def _create_network(input_shape, num_classes):
     inputs = x = tf.keras.layers.Input(input_shape)
     x = conv2d(128)(x)
     x = bn()(x)
-    x = blocks(128, 8)(x)
-    x = down(256)(x)
+    x = blocks(128, 8, down=False)(x)
     x = blocks(256, 8)(x)
-    x = down(512)(x)
     x = blocks(512, 8)(x)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dense(
@@ -244,9 +227,9 @@ def _create_network(input_shape, num_classes):
     return model
 
 
-def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="test"):
+def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
     """generator。"""
-    if data_augmentation == "train":
+    if mode == "train":
         aug1 = A.Compose(
             [
                 RandomTransform((32, 32), p=1),
@@ -274,7 +257,7 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
             ]
         )
         aug2 = RandomErasing(p=0.5)
-    elif data_augmentation == "refine":
+    elif mode == "refine":
         aug1 = RandomTransform.create_refine((32, 32))
         aug2 = A.Compose([])
     else:
@@ -299,7 +282,7 @@ def _generate(X, y, batch_size, num_classes, shuffle=False, data_augmentation="t
         return X, y
 
     ds = tf.data.Dataset.from_tensor_slices((X, y))
-    if data_augmentation == "train":
+    if mode == "train":
         assert shuffle
         ds = mixup(ds, process1, process2)
     else:
