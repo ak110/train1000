@@ -14,6 +14,8 @@ import scipy
 import sklearn.metrics
 import tensorflow as tf
 
+logger = logging.getLogger(__name__)
+
 
 def _main():
     try:
@@ -46,14 +48,17 @@ def _main():
     if hvd.rank() == 0:
         args.results_dir.mkdir(parents=True, exist_ok=True)
         handlers.append(
-            logging.FileHandler(args.results_dir / f"{args.data}.log", encoding="utf-8")
+            logging.FileHandler(
+                args.results_dir / f"{args.data}.log", mode="w", encoding="utf-8"
+            )
         )
     logging.basicConfig(
         format="[%(levelname)-5s] %(message)s", level="DEBUG", handlers=handlers
     )
-    logger = logging.getLogger(__name__)
 
-    (X_train, y_train), (X_test, y_test), num_classes = load_data(args.data)
+    (X_train, y_train), (X_val, y_val), (X_test, y_test), num_classes = load_data(
+        args.data
+    )
 
     epochs = 2 if args.check else 1800
     refine_epoch = 2 if args.check else 50
@@ -64,7 +69,6 @@ def _main():
     optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
 
-    @tf.function
     def loss(y_true, logits):
         # categorical crossentropy
         log_p = logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True)
@@ -90,9 +94,9 @@ def _main():
         ),
         steps_per_epoch=-(-len(X_train) // (batch_size * hvd.size())),
         validation_data=create_dataset(
-            X_test, y_test, batch_size, num_classes, shuffle=True
+            X_val, y_val, batch_size, num_classes, shuffle=True
         ),
-        validation_steps=-(-len(X_test) * 3 // (batch_size * hvd.size())),
+        validation_steps=-(-len(X_val) * 3 // (batch_size * hvd.size())),
         validation_freq=100,
         epochs=epochs,
         callbacks=[
@@ -116,9 +120,9 @@ def _main():
         ),
         steps_per_epoch=-(-len(X_train) // (batch_size * hvd.size())),
         validation_data=create_dataset(
-            X_test, y_test, batch_size, num_classes, shuffle=True
+            X_val, y_val, batch_size, num_classes, shuffle=True
         ),
-        validation_steps=-(-len(X_test) * 3 // (batch_size * hvd.size())),
+        validation_steps=-(-len(X_val) * 3 // (batch_size * hvd.size())),
         validation_freq=10,
         epochs=refine_epoch,
         callbacks=[
@@ -129,24 +133,28 @@ def _main():
     )
 
     if hvd.rank() == 0:
-        # 検証
-        pred_test = model.predict(
-            create_dataset(
-                X_test,
-                np.zeros((len(X_test),), dtype=np.int32),
-                batch_size,
-                num_classes,
-            ),
-            steps=-(-len(X_test) // batch_size),
-            verbose=1 if hvd.rank() == 0 else 0,
-        )
-        acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
-        ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test, axis=-1))
         logger.info(f"Arguments: --data={args.data}")
-        logger.info(f"Test Accuracy:      {acc:.4f}")
-        logger.info(f"Test Cross Entropy: {ce:.4f}")
+        # 検証/評価
+        # 両方出してたら分けた意味ない気はするけど面倒なので両方出しちゃう
+        # 普段はValを見ておいて最終評価はTestというお気持ち
+        evaluate("Val", X_val, y_val, model, batch_size, num_classes)
+        evaluate("Test", X_test, y_test, model, batch_size, num_classes)
         # 後で何かしたくなった時のために一応保存
         model.save(args.results_dir / f"{args.data}.h5", include_optimizer=False)
+
+
+def evaluate(name, X_test, y_test, model, batch_size, num_classes):
+    pred_test = model.predict(
+        create_dataset(
+            X_test, np.zeros((len(X_test),), dtype=np.int32), batch_size, num_classes,
+        ),
+        steps=-(-len(X_test) // batch_size),
+        verbose=1 if hvd.rank() == 0 else 0,
+    )
+    acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
+    ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test, axis=-1))
+    logger.info(f"{name} Accuracy:      {acc:.4f}")
+    logger.info(f"{name} Cross Entropy: {ce:.4f}")
 
 
 def load_data(data):
@@ -160,8 +168,11 @@ def load_data(data):
     y_train = np.squeeze(y_train)
     y_test = np.squeeze(y_test)
     num_classes = len(np.unique(y_train))
+    # 末尾1万件を検証データとする (本実装独自)
+    X_val, y_val = X_train[-10000:], y_train[-10000:]
+    # 訓練データはクラスごとに先頭から切り出す (Train with 1000準拠)
     X_train, y_train = extract1000(X_train, y_train, num_classes=num_classes)
-    return (X_train, y_train), (X_test, y_test), num_classes
+    return (X_train, y_train), (X_val, y_val), (X_test, y_test), num_classes
 
 
 def extract1000(X, y, num_classes):
@@ -221,7 +232,7 @@ def create_network(input_shape, num_classes):
     x = blocks(512, 8)(x)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dense(
-        num_classes, kernel_regularizer=tf.keras.regularizers.l2(1e-4)
+        num_classes, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(1e-4)
     )(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
     return model
@@ -246,10 +257,6 @@ def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
                         A.IAASharpen(alpha=(0, 0.5), p=0.125),
                         A.IAAEmboss(alpha=(0, 0.5), p=0.125),
                         A.GaussNoise(var_limit=(0, 10.0 ** 2), p=0.125),
-                        A.ISONoise(color_shift=(0, 0.05), intensity=(0, 0.5), p=0.125),
-                        A.ImageCompression(
-                            quality_lower=50, quality_upper=100, p=0.125
-                        ),
                         RandomErasing(alpha=0.125, p=0.25),
                     ],
                     p=1,

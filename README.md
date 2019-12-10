@@ -2,17 +2,20 @@
 
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-訓練データを1000件だけ使って学習してみる試み、[Train with 1000](http://www.ok.sc.e.titech.ac.jp/~mtanaka/proj/train1000/)をやってみたコード。
+訓練データを1,000件だけ使って学習してみる試み、[Train with 1000](http://www.ok.sc.e.titech.ac.jp/~mtanaka/proj/train1000/)をやってみたコード。
 
 tf.kerasを使って1ファイルで全て実装したので、初心者にもわかりやすいコードになってます！ (嘘)
 
-## スコア
+## スコア (CIFAR-10)
 
 ```txt
-[INFO ] Arguments: --data=cifar10
-[INFO ] Test Accuracy:      0.7992
-[INFO ] Test Cross Entropy: 0.7670
+[INFO ] Val Accuracy:      0.8065
+[INFO ] Val Cross Entropy: 0.7569
+[INFO ] Test Accuracy:      0.8061
+[INFO ] Test Cross Entropy: 0.7582
 ```
+
+Valは訓練データの末尾10,000件。(独自)
 
 ## 動かすために必要なもの
 
