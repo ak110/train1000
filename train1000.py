@@ -61,7 +61,7 @@ def _main():
     )
 
     epochs = 2 if args.check else 1800
-    refine_epoch = 2 if args.check else 50
+    refine_epoch = 2 if args.check else 100
     batch_size = 64
     base_lr = 1e-3 * batch_size * hvd.size()
 
