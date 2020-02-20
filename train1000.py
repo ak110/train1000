@@ -383,6 +383,9 @@ class RandomTransform(A.DualTransform):
 
     Args:
         size: 出力サイズ(h, w)
+        flip: 反転の有無(vertical, horizontal)
+        translate: 平行移動の量(vertical, horizontal)
+        border_mode: edge, reflect, wrap
 
     """
 
@@ -390,9 +393,10 @@ class RandomTransform(A.DualTransform):
     def create_refine(
         cls,
         size: tuple,
-        flip: tuple = (True, False),
+        flip: tuple = (False, True),
         translate: tuple = (0.0625, 0.0625),
         border_mode: str = "edge",
+        clip_bboxes=True,
         always_apply: bool = False,
         p: float = 1.0,
     ):
@@ -405,6 +409,7 @@ class RandomTransform(A.DualTransform):
             scale_prob=0.0,
             aspect_prob=0.0,
             rotate_prob=0.0,
+            clip_bboxes=clip_bboxes,
             always_apply=always_apply,
             p=p,
         )
@@ -412,7 +417,7 @@ class RandomTransform(A.DualTransform):
     def __init__(
         self,
         size,
-        flip: tuple = (True, False),
+        flip: tuple = (False, True),
         translate: tuple = (0.125, 0.125),
         scale_prob: float = 0.5,
         scale_range: tuple = (2 / 3, 3 / 2),
@@ -422,6 +427,7 @@ class RandomTransform(A.DualTransform):
         rotate_prob: float = 0.25,
         rotate_range: tuple = (-15, +15),
         border_mode: str = "edge",
+        clip_bboxes: bool = True,
         always_apply: bool = False,
         p: float = 1.0,
     ):
@@ -437,6 +443,7 @@ class RandomTransform(A.DualTransform):
         self.rotate_prob = rotate_prob
         self.rotate_range = rotate_range
         self.border_mode = border_mode
+        self.clip_bboxes = clip_bboxes
 
     def apply(self, image, m, interp=None, **params):
         # pylint: disable=arguments-differ
@@ -451,7 +458,12 @@ class RandomTransform(A.DualTransform):
         else:
             # 縮小ならINTER_AREA, 拡大ならINTER_LANCZOS4
             sh, sw = image.shape[:2]
-            dr = self.apply_to_keypoint([(0, 0), (sw, 0), (sw, sh), (0, sh)], m)
+            dr = cv2.perspectiveTransform(
+                np.array([(0, 0), (sw, 0), (sw, sh), (0, sh)])
+                .reshape((-1, 1, 2))
+                .astype(np.float32),
+                m,
+            ).reshape((4, 2))
             dw = min(np.linalg.norm(dr[1] - dr[0]), np.linalg.norm(dr[2] - dr[3]))
             dh = min(np.linalg.norm(dr[3] - dr[0]), np.linalg.norm(dr[2] - dr[1]))
             cv2_interp = cv2.INTER_AREA if dw <= sw or dh <= sh else cv2.INTER_LANCZOS4
@@ -476,21 +488,33 @@ class RandomTransform(A.DualTransform):
             image = np.transpose(resized_list, (1, 2, 0))
         return image
 
-    def apply_to_bbox(self, bbox, m, **params):
+    def apply_to_bbox(self, bbox, m, image_size, **params):
         # pylint: disable=arguments-differ
         del params
         bbox = np.asarray(bbox)
-        return cv2.perspectiveTransform(
-            np.reshape(bbox, (-1, 1, 2)).astype(np.float32), m
+        assert bbox.shape == (4,)
+        bbox *= np.array([image_size[1], image_size[0]] * 2)
+        bbox = cv2.perspectiveTransform(
+            bbox.reshape((-1, 1, 2)).astype(np.float32), m
         ).reshape(bbox.shape)
+        if bbox[2] < bbox[0]:
+            bbox = bbox[[2, 1, 0, 3]]
+        if bbox[3] < bbox[1]:
+            bbox = bbox[[0, 3, 2, 1]]
+        bbox /= np.array([self.size[1], self.size[0]] * 2)
+        assert bbox.shape == (4,)
+        if self.clip_bboxes:
+            bbox = np.clip(bbox, 0, 1)
+        return tuple(bbox)
 
     def apply_to_keypoint(self, keypoint, m, **params):
         # pylint: disable=arguments-differ
         del params
-        keypoint = np.asarray(keypoint)
-        return cv2.perspectiveTransform(
-            np.reshape(keypoint, (-1, 1, 2)).astype(np.float32), m
-        ).reshape(keypoint.shape)
+        xy = np.asarray(keypoint[:2])
+        xy = cv2.perspectiveTransform(
+            xy.reshape((-1, 1, 2)).astype(np.float32), m
+        ).reshape(xy.shape)
+        return tuple(xy) + tuple(keypoint[2:])
 
     def apply_to_mask(self, img, interp=None, **params):
         # pylint: disable=arguments-differ
@@ -517,19 +541,19 @@ class RandomTransform(A.DualTransform):
             else 1.0
         )
 
-        flip_h = self.flip[0] and random.random() <= 0.5
-        flip_v = self.flip[1] and random.random() <= 0.5
-        scale_h = scale * np.sqrt(ar)
+        flip_v = self.flip[0] and random.random() <= 0.5
+        flip_h = self.flip[1] and random.random() <= 0.5
         scale_v = scale / np.sqrt(ar)
+        scale_h = scale * np.sqrt(ar)
         degrees = (
             random.uniform(self.rotate_range[0], self.rotate_range[1])
             if random.random() <= self.rotate_prob
             else 0
         )
-        pos_h = random.uniform(0, 1)
         pos_v = random.uniform(0, 1)
-        translate_h = random.uniform(-self.translate[0], self.translate[0])
-        translate_v = random.uniform(-self.translate[1], self.translate[1])
+        pos_h = random.uniform(0, 1)
+        translate_v = random.uniform(-self.translate[0], self.translate[0])
+        translate_h = random.uniform(-self.translate[1], self.translate[1])
         # 左上から時計回りに座標を用意
         src_points = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
         dst_points = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
@@ -557,7 +581,7 @@ class RandomTransform(A.DualTransform):
         dst_points[:, 0] *= self.size[1]
         dst_points[:, 1] *= self.size[0]
         m = cv2.getPerspectiveTransform(src_points, dst_points)
-        return {"m": m}
+        return {"m": m, "image_size": image.shape[:2]}
 
     @property
     def targets_as_params(self):
