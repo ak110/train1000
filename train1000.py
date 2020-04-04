@@ -5,6 +5,7 @@ import functools
 import logging
 import pathlib
 import random
+import typing
 
 import albumentations as A
 import cv2
@@ -289,12 +290,12 @@ def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
         return X, y
 
     ds = tf.data.Dataset.from_tensor_slices((X, y))
+    ds = ds.shuffle(buffer_size=len(X)) if shuffle else ds
+    ds = ds.map(process1, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     if mode == "train":
         assert shuffle
-        ds = mixup(ds, process1, process2)
+        ds = mixup(ds, process2)
     else:
-        ds = ds.shuffle(buffer_size=len(X)) if shuffle else ds
-        ds = ds.map(process1, num_parallel_calls=tf.data.experimental.AUTOTUNE)
         ds = ds.map(process2)
     ds = ds.repeat() if shuffle else ds  # シャッフル時はバッチサイズを固定するため先にrepeat
     ds = ds.batch(batch_size)
@@ -302,25 +303,32 @@ def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
     return ds
 
 
-def mixup(ds, premix_fn, postmix_fn):
-    """mixup: <https://arxiv.org/abs/1710.09412>"""
+def mixup(
+    ds: tf.data.Dataset,
+    postmix_fn: typing.Callable = None,
+    num_parallel_calls: int = None,
+):
+    """tf.dataでのmixup: <https://arxiv.org/abs/1710.09412>
 
-    def mixup_fn(data1, data2):
-        X1, y1 = data1
-        X2, y2 = data2
-        r = tf.random.uniform((), 0, 1)
-        X = X1 * r + X2 * (1 - r)
-        y = y1 * r + y2 * (1 - r)
-        return X, y
+    Args:
+        ds: 元のデータセット
+        postmix_fn: mixup後の処理
+        num_parallel_calls: premix_fnの並列数
 
-    data_count = tf.data.experimental.cardinality(ds)
-    ds1 = ds.shuffle(buffer_size=data_count)
-    ds2 = ds.shuffle(buffer_size=data_count)
-    ds1 = ds1.map(premix_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    ds2 = ds2.map(premix_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    ds = tf.data.Dataset.zip((ds1, ds2))
-    ds = ds.map(mixup_fn)
-    ds = ds.map(postmix_fn)
+    """
+
+    @tf.function
+    def mixup_fn(*data):
+        r = tf.random.uniform(())
+        data = [
+            tf.cast(d[0], tf.float32) * r + tf.cast(d[1], tf.float32) * (1 - r)
+            for d in data
+        ]
+        return data if postmix_fn is None else postmix_fn(*data)
+
+    ds = ds.repeat()
+    ds = ds.batch(2)
+    ds = ds.map(mixup_fn, num_parallel_calls=num_parallel_calls)
     return ds
 
 
