@@ -57,6 +57,20 @@ def _main():
         format="[%(levelname)-5s] %(message)s", level="DEBUG", handlers=handlers
     )
 
+    runs = 1 if args.check else 5
+    val_acc, val_ce, test_acc, test_ce = zip(*[_run(args) for _ in range(runs)])
+    if runs > 1:
+        val_acc = np.mean(val_acc, axis=0)
+        val_ce = np.mean(val_ce, axis=0)
+        test_acc = np.mean(test_acc, axis=0)
+        test_ce = np.mean(test_ce, axis=0)
+        logger.info(f"Val Accuracy:       {val_acc:.4f} ({runs} runs)")
+        logger.info(f"Val Cross Entropy:  {val_ce:.4f} ({runs} runs)")
+        logger.info(f"Test Accuracy:      {test_acc:.4f} ({runs} runs)")
+        logger.info(f"Test Cross Entropy: {test_ce:.4f} ({runs} runs)")
+
+
+def _run(args):
     (X_train, y_train), (X_val, y_val), (X_test, y_test), num_classes = load_data(
         args.data
     )
@@ -133,15 +147,18 @@ def _main():
         verbose=1 if hvd.rank() == 0 else 0,
     )
 
+    logger.info(f"Arguments: --data={args.data}")
+    # 検証/評価
+    # 両方出してたら分けた意味ない気はするけど面倒なので両方出しちゃう
+    # 普段はValを見ておいて最終評価はTestというお気持ち
+    val_acc, val_ce = evaluate("Val", X_val, y_val, model, batch_size, num_classes)
+    test_acc, test_ce = evaluate("Test", X_test, y_test, model, batch_size, num_classes)
+
     if hvd.rank() == 0:
-        logger.info(f"Arguments: --data={args.data}")
-        # 検証/評価
-        # 両方出してたら分けた意味ない気はするけど面倒なので両方出しちゃう
-        # 普段はValを見ておいて最終評価はTestというお気持ち
-        evaluate("Val", X_val, y_val, model, batch_size, num_classes)
-        evaluate("Test", X_test, y_test, model, batch_size, num_classes)
         # 後で何かしたくなった時のために一応保存
         model.save(args.results_dir / f"{args.data}.h5", include_optimizer=False)
+
+    return val_acc, val_ce, test_acc, test_ce
 
 
 def evaluate(name, X_test, y_test, model, batch_size, num_classes):
@@ -156,6 +173,7 @@ def evaluate(name, X_test, y_test, model, batch_size, num_classes):
     ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test, axis=-1))
     logger.info(f"{name} Accuracy:      {acc:.4f}")
     logger.info(f"{name} Cross Entropy: {ce:.4f}")
+    return acc, ce
 
 
 def load_data(data):

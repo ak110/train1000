@@ -9,23 +9,21 @@ tf.kerasを使って1ファイルで全て実装したので、初心者にも�
 ## スコア (CIFAR-10)
 
 ```txt
-[INFO ] Val Accuracy:      0.8060
-[INFO ] Val Cross Entropy: 0.7550
-[INFO ] Test Accuracy:      0.8018
-[INFO ] Test Cross Entropy: 0.7646
+[INFO ] Val Accuracy:       0.8039 (5 runs)
+[INFO ] Val Cross Entropy:  0.7539 (5 runs)
+[INFO ] Test Accuracy:      0.8022 (5 runs)
+[INFO ] Test Cross Entropy: 0.7609 (5 runs)
 ```
 
 Valは訓練データの末尾10,000件。(独自)
 
 ## 動かすために必要なもの
 
-- TensorFlow (2.0.0で動作確認)
+- TensorFlow (2.1.0で動作確認)
 - Horovod
 - OpenMPI (複数GPU時)
 - albumentations
 - scikit-learn
-- pydot
-- scipy
 
 ## やってること
 
