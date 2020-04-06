@@ -78,10 +78,14 @@ def _run(args):
     epochs = 2 if args.check else 1800
     refine_epoch = 2 if args.check else 100
     batch_size = 64
-    base_lr = 1e-3 * batch_size * hvd.size()
+    global_batch_size = batch_size * hvd.size()
+    base_lr = 1e-3 * global_batch_size
 
     model = create_network(X_train.shape[1:], num_classes)
-    optimizer = tf.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
+    learning_rate = tf.keras.experimental.CosineDecay(
+        base_lr, decay_steps=epochs * -(-len(X_train) // global_batch_size)
+    )
+    optimizer = tf.keras.optimizers.SGD(learning_rate, momentum=0.9, nesterov=True)
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
 
     def loss(y_true, logits):
@@ -107,15 +111,14 @@ def _run(args):
         create_dataset(
             X_train, y_train, batch_size, num_classes, shuffle=True, mode="train",
         ),
-        steps_per_epoch=-(-len(X_train) // (batch_size * hvd.size())),
+        steps_per_epoch=-(-len(X_train) // global_batch_size),
         validation_data=create_dataset(
             X_val, y_val, batch_size, num_classes, shuffle=True
         ),
-        validation_steps=-(-len(X_val) * 3 // (batch_size * hvd.size())),
+        validation_steps=-(-len(X_val) * 3 // global_batch_size),
         validation_freq=100,
         epochs=epochs,
         callbacks=[
-            CosineAnnealing(),
             hvd.callbacks.BroadcastGlobalVariablesCallback(0),
             hvd.callbacks.MetricAverageCallback(),
         ],
@@ -126,18 +129,20 @@ def _run(args):
     for layer in model.layers:
         if isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
-    optimizer = tf.keras.optimizers.SGD(lr=base_lr / 100, momentum=0.9, nesterov=True)
+    optimizer = tf.keras.optimizers.SGD(
+        learning_rate=base_lr / 100, momentum=0.9, nesterov=True
+    )
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
     model.compile(optimizer, loss, metrics=["acc"], experimental_run_tf_function=False)
     model.fit(
         create_dataset(
             X_train, y_train, batch_size, num_classes, shuffle=True, mode="refine",
         ),
-        steps_per_epoch=-(-len(X_train) // (batch_size * hvd.size())),
+        steps_per_epoch=-(-len(X_train) // global_batch_size),
         validation_data=create_dataset(
             X_val, y_val, batch_size, num_classes, shuffle=True
         ),
-        validation_steps=-(-len(X_val) * 3 // (batch_size * hvd.size())),
+        validation_steps=-(-len(X_val) * 3 // global_batch_size),
         validation_freq=10,
         epochs=refine_epoch,
         callbacks=[
@@ -348,47 +353,6 @@ def mixup(
     ds = ds.batch(2)
     ds = ds.map(mixup_fn, num_parallel_calls=num_parallel_calls)
     return ds
-
-
-class CosineAnnealing(tf.keras.callbacks.Callback):
-    """Cosine annealing <https://arxiv.org/abs/1608.03983>"""
-
-    def __init__(self, factor=0.01, warmup_epochs=5):
-        super().__init__()
-        self.factor = factor
-        self.warmup_epochs = warmup_epochs
-        self.lr = None
-
-    def on_train_begin(self, logs=None):
-        del logs
-        if not hasattr(self.model.optimizer, "lr"):
-            raise ValueError('Optimizer must have a "lr" attribute.')
-        self.lr = tf.keras.backend.get_value(self.model.optimizer.lr)
-
-    def on_epoch_begin(self, epoch, logs=None):
-        del logs
-        if epoch + 1 < self.warmup_epochs:
-            # linear learning rate warmup <https://arxiv.org/abs/1706.02677>
-            lr = self.lr * (epoch + 1) / self.warmup_epochs
-        else:
-            # cosine annealing <https://arxiv.org/abs/1608.03983>
-            min_lr = self.lr * self.factor
-            lr = min_lr + 0.5 * (self.lr - min_lr) * (
-                1 + np.cos(np.pi * (epoch + 1) / self.params["epochs"])
-            )
-        tf.keras.backend.set_value(self.model.optimizer.lr, lr)
-        # warmup後はmomentumをクリアしてみる
-        # https://twitter.com/ak11/status/1194763993082023936
-        if 2 <= epoch + 1 <= self.warmup_epochs:
-            # 手抜き: SGD前提で無条件に全部ゼロ埋め
-            self.model.optimizer.set_weights(
-                [np.zeros_like(w) for w in self.model.optimizer.get_weights()]
-            )
-
-    def on_epoch_end(self, epoch, logs=None):
-        del epoch
-        logs = logs or {}
-        logs["lr"] = tf.keras.backend.get_value(self.model.optimizer.lr)
 
 
 class RandomCompose(A.Compose):
