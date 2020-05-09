@@ -166,13 +166,19 @@ def _run(args):
 
 
 def evaluate(name, X_test, y_test, model, batch_size, num_classes):
+    # shardingして推論
+    shard_size = len(X_test) // hvd.size()
+    shard_offset = shard_size * hvd.rank()
+    s = X_test[shard_offset : shard_offset + shard_size]
     pred_test = model.predict(
         create_dataset(
-            X_test, np.zeros((len(X_test),), dtype=np.int32), batch_size, num_classes,
+            s, np.zeros((len(s),), dtype=np.int32), batch_size, num_classes,
         ),
-        steps=-(-len(X_test) // batch_size),
+        steps=-(-len(s) // batch_size),
         verbose=1 if hvd.rank() == 0 else 0,
     )
+    pred_test = hvd.allgather(pred_test)
+    # 評価
     acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
     ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test, axis=-1))
     logger.info(f"{name} Accuracy:      {acc:.4f}")
