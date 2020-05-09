@@ -83,7 +83,9 @@ def _run(args):
     global_batch_size = batch_size * hvd.size()
     base_lr = 1e-3 * global_batch_size
 
-    model = create_network(X_train.shape[1:], num_classes)
+    input_shape = X_train.shape[1:]
+    model = create_network(input_shape, num_classes)
+    ttam = create_tta_model(model, input_shape)
     learning_rate = tf.keras.experimental.CosineDecay(
         base_lr, decay_steps=epochs * -(-len(X_train) // global_batch_size)
     )
@@ -155,8 +157,8 @@ def _run(args):
     # 検証/評価
     # 両方出してたら分けた意味ない気はするけど面倒なので両方出しちゃう
     # 普段はValを見ておいて最終評価はTestというお気持ち
-    val_acc, val_ce = evaluate("Val", X_val, y_val, model, batch_size, num_classes)
-    test_acc, test_ce = evaluate("Test", X_test, y_test, model, batch_size, num_classes)
+    val_acc, val_ce = evaluate("Val", X_val, y_val, ttam, batch_size, num_classes)
+    test_acc, test_ce = evaluate("Test", X_test, y_test, ttam, batch_size, num_classes)
 
     if hvd.rank() == 0:
         # 後で何かしたくなった時のために一応保存
@@ -177,7 +179,7 @@ def evaluate(name, X_test, y_test, model, batch_size, num_classes):
         steps=-(-len(s) // batch_size),
         verbose=1 if hvd.rank() == 0 else 0,
     )
-    pred_test = hvd.allgather(pred_test)
+    pred_test = hvd.allgather(pred_test).numpy()
     # 評価
     acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
     ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test, axis=-1))
@@ -267,6 +269,29 @@ def create_network(input_shape, num_classes):
     return model
 
 
+def create_tta_model(model, input_shape):
+    """Test-time augmentationするモデルを作って返す。
+
+    再現性が不要であれば、精度や実装の簡単さを考えると
+    mixup以外の訓練時のData Augmentationをかけるのがよい気もするけど、
+    Data Augmentationを変更したときの影響が複雑になりそうなのが嫌なので、
+    ここでは固定で25 crops × mirrorの50個の平均を取る事にする。
+
+    """
+    inputs = tf.keras.layers.Input(input_shape)
+    x = tf.pad(inputs, ((0, 0), (4, 4), (4, 4), (0, 0)), mode="SYMMETRIC")
+    x_list = []
+    for mirror in [False, True]:
+        xm = x[:, :, :, ::-1] if mirror else x
+        for v in [0, 2, 4, 6, 8]:
+            for h in [0, 2, 4, 6, 8]:
+                x_list.append(xm[:, v : v + input_shape[0], h : h + input_shape[1]])
+    x_list = [model(x, training=False) for x in x_list]
+    x = tf.reduce_mean(x_list, axis=0)
+    model = tf.keras.models.Model(inputs, x)
+    return model
+
+
 def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
     """generator。"""
     if mode == "train":
@@ -314,6 +339,7 @@ def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
 
     def process2(X, y):
         X = tf.numpy_function(do_aug2, inp=[X], Tout=tf.float32)
+        X = tf.ensure_shape(X, (None, None, None))
         X = X / 127.5 - 1
         return X, y
 
