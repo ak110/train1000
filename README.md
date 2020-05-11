@@ -30,7 +30,6 @@ Valは訓練データの末尾10,000件。(独自)
 - ResNet風
 - SGD+Nesterov momentum
 - cosine annealing <https://arxiv.org/abs/1608.03983>
-- linear learning rate warmup <https://arxiv.org/abs/1706.02677>
 - Random Erasing <https://arxiv.org/abs/1708.04896>
 - mixup <https://arxiv.org/abs/1710.09412>
 - Label smoothing <https://myrtle.ai/how-to-train-your-resnet-8-bag-of-tricks/>
