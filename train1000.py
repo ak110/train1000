@@ -85,7 +85,6 @@ def _run(args):
 
     input_shape = X_train.shape[1:]
     model = create_network(input_shape, num_classes)
-    ttam = create_tta_model(model, input_shape)
     learning_rate = tf.keras.experimental.CosineDecay(
         base_lr, decay_steps=epochs * -(-len(X_train) // global_batch_size)
     )
@@ -157,8 +156,8 @@ def _run(args):
     # 検証/評価
     # 両方出してたら分けた意味ない気はするけど面倒なので両方出しちゃう
     # 普段はValを見ておいて最終評価はTestというお気持ち
-    val_acc, val_ce = evaluate("Val", X_val, y_val, ttam, batch_size, num_classes)
-    test_acc, test_ce = evaluate("Test", X_test, y_test, ttam, batch_size, num_classes)
+    val_acc, val_ce = evaluate("Val", X_val, y_val, model, batch_size, num_classes)
+    test_acc, test_ce = evaluate("Test", X_test, y_test, model, batch_size, num_classes)
 
     if hvd.rank() == 0:
         # 後で何かしたくなった時のために一応保存
@@ -168,18 +167,26 @@ def _run(args):
 
 
 def evaluate(name, X_test, y_test, model, batch_size, num_classes):
-    # shardingして推論
-    shard_size = len(X_test) // hvd.size()
-    shard_offset = shard_size * hvd.rank()
-    s = X_test[shard_offset : shard_offset + shard_size]
-    pred_test = model.predict(
-        create_dataset(
-            s, np.zeros((len(s),), dtype=np.int32), batch_size, num_classes,
-        ),
-        steps=-(-len(s) // batch_size),
-        verbose=1 if hvd.rank() == 0 else 0,
-    )
-    pred_test = hvd.allgather(pred_test).numpy()
+    pred_test_list = []
+    for _ in range(64):
+        # shardingして推論＆TTA (再現性は無いので注意)
+        shard_size = len(X_test) // hvd.size()
+        shard_offset = shard_size * hvd.rank()
+        s = X_test[shard_offset : shard_offset + shard_size]
+        pred_test = model.predict(
+            create_dataset(
+                s,
+                np.zeros((len(s),), dtype=np.int32),
+                batch_size,
+                num_classes,
+                mode="refine",
+            ),
+            steps=-(-len(s) // batch_size),
+            verbose=1 if hvd.rank() == 0 else 0,
+        )
+        pred_test = hvd.allgather(pred_test).numpy()
+        pred_test_list.append(pred_test)
+    pred_test = np.mean(pred_test_list, axis=0)
     # 評価
     acc = sklearn.metrics.accuracy_score(y_test, pred_test.argmax(axis=-1))
     ce = sklearn.metrics.log_loss(y_test, scipy.special.softmax(pred_test, axis=-1))
@@ -266,29 +273,6 @@ def create_network(input_shape, num_classes):
         num_classes, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(1e-4)
     )(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=x)
-    return model
-
-
-def create_tta_model(model, input_shape):
-    """Test-time augmentationするモデルを作って返す。
-
-    再現性が不要であれば、精度や実装の簡単さを考えると
-    mixup以外の訓練時のData Augmentationをかけるのがよい気もするけど、
-    Data Augmentationを変更したときの影響が複雑になりそうなのが嫌なので、
-    ここでは固定で25 crops × mirrorの50個の平均を取る事にする。
-
-    """
-    inputs = tf.keras.layers.Input(input_shape)
-    x = tf.pad(inputs, ((0, 0), (4, 4), (4, 4), (0, 0)), mode="SYMMETRIC")
-    x_list = []
-    for mirror in [False, True]:
-        xm = x[:, :, :, ::-1] if mirror else x
-        for v in [0, 2, 4, 6, 8]:
-            for h in [0, 2, 4, 6, 8]:
-                x_list.append(xm[:, v : v + input_shape[0], h : h + input_shape[1]])
-    x_list = [model(x, training=False) for x in x_list]
-    x = tf.reduce_mean(x_list, axis=0)
-    model = tf.keras.models.Model(inputs, x)
     return model
 
 
