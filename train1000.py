@@ -14,6 +14,7 @@ import numpy as np
 import scipy
 import sklearn.metrics
 import tensorflow as tf
+import tensorflow_addons as tfa
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ def create_network(input_shape, num_classes):
         tf.keras.layers.BatchNormalization,
         gamma_regularizer=tf.keras.regularizers.l2(1e-4),
     )
-    act = functools.partial(tf.keras.layers.Activation, "relu")
+    act = functools.partial(tf.keras.layers.Activation, tfa.activations.mish)
 
     def blocks(filters, count, down=True):
         def layers(x):
