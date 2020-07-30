@@ -250,8 +250,10 @@ def create_network(input_shape, num_classes):
                 x = bn()(x)
             for _ in range(count):
                 sc = x
+                x = bn(center=False, scale=False)(x)
+                x = act()(x)
                 x = conv2d(filters)(x)
-                x = bn()(x)
+                x = bn(center=False, scale=False)(x)
                 x = act()(x)
                 x = conv2d(filters)(x)
                 # resblockのadd前だけgammaの初期値を0にする。 <https://arxiv.org/abs/1812.01187>
