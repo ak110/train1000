@@ -109,7 +109,7 @@ def _run(args):
 
     model.fit(
         create_dataset(
-            X_train, y_train, batch_size, num_classes, shuffle=True, mode="train",
+            X_train, y_train, batch_size, num_classes, shuffle=True, mode="train"
         ),
         steps_per_epoch=-(-len(X_train) // global_batch_size),
         validation_data=create_dataset(
@@ -136,7 +136,7 @@ def _run(args):
     model.compile(optimizer, loss, metrics=["acc"], experimental_run_tf_function=False)
     model.fit(
         create_dataset(
-            X_train, y_train, batch_size, num_classes, shuffle=True, mode="refine",
+            X_train, y_train, batch_size, num_classes, shuffle=True, mode="refine"
         ),
         steps_per_epoch=-(-len(X_train) // global_batch_size),
         validation_data=create_dataset(
