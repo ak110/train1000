@@ -95,7 +95,7 @@ def _run(args):
         # categorical crossentropy
         log_p = logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True)
         loss = -tf.math.reduce_sum(y_true * log_p, axis=-1)
-        # Label smoothing <https://myrtle.ai/how-to-train-your-resnet-8-bag-of-tricks/>
+        # Label smoothing <https://myrtle.ai/learn/how-to-train-your-resnet-8-bag-of-tricks/>
         label_smoothing = 0.2
         kl = -tf.math.reduce_mean(log_p, axis=-1)
         loss = (1 - label_smoothing) * loss + label_smoothing * kl
@@ -329,7 +329,9 @@ def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
 
     ds = tf.data.Dataset.from_tensor_slices((X, y))
     ds = ds.shuffle(buffer_size=len(X)) if shuffle else ds
-    ds = ds.map(process1, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    ds = ds.map(
+        process1, num_parallel_calls=tf.data.AUTOTUNE, deterministic=not shuffle
+    )
     if mode == "train":
         assert shuffle
         ds = mixup(ds, process2)
@@ -337,7 +339,7 @@ def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
         ds = ds.map(process2)
     ds = ds.repeat() if shuffle else ds  # シャッフル時はバッチサイズを固定するため先にrepeat
     ds = ds.batch(batch_size)
-    ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+    ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
     return ds
 
 
