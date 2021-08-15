@@ -9,10 +9,10 @@ tf.kerasを使って1ファイルで全て実装したので、初心者にも�
 ## スコア (CIFAR-10)
 
 ```txt
-[INFO ] Val Accuracy:       0.8119 (5 runs)
-[INFO ] Val Cross Entropy:  0.7364 (5 runs)
-[INFO ] Test Accuracy:      0.8112 (5 runs)
-[INFO ] Test Cross Entropy: 0.7406 (5 runs)
+[INFO ] Val Accuracy:       0.8149 (5 runs)
+[INFO ] Val Cross Entropy:  0.7342 (5 runs)
+[INFO ] Test Accuracy:      0.8130 (5 runs)
+[INFO ] Test Cross Entropy: 0.7386 (5 runs)
 ```
 
 Valは訓練データの末尾10,000件。(独自)
@@ -28,6 +28,7 @@ Valは訓練データの末尾10,000件。(独自)
 ## やってること
 
 - ResNet風
+- Anti-Aliasing <https://arxiv.org/abs/2108.03489>
 - SGD+Nesterov momentum
 - cosine annealing <https://arxiv.org/abs/1608.03983>
 - Random Erasing <https://arxiv.org/abs/1708.04896>
