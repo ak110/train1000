@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Train with 1000"""
+from __future__ import annotations
+
 import argparse
 import functools
 import logging
@@ -82,12 +84,11 @@ def _run(args):
     batch_size = 64
     global_batch_size = batch_size * hvd.size()
     base_lr = 1e-3 * global_batch_size
+    steps_per_epoch = -(-len(X_train) // global_batch_size)
 
     input_shape = X_train.shape[1:]
     model = create_network(input_shape, num_classes)
-    learning_rate = tf.keras.experimental.CosineDecay(
-        base_lr, decay_steps=epochs * -(-len(X_train) // global_batch_size)
-    )
+    learning_rate = CosineAnnealing(base_lr, decay_steps=epochs * steps_per_epoch)
     optimizer = tf.keras.optimizers.SGD(learning_rate, momentum=0.9, nesterov=True)
     optimizer = hvd.DistributedOptimizer(optimizer, compression=hvd.Compression.fp16)
 
@@ -111,12 +112,12 @@ def _run(args):
         create_dataset(
             X_train, y_train, batch_size, num_classes, shuffle=True, mode="train"
         ),
-        steps_per_epoch=-(-len(X_train) // global_batch_size),
+        steps_per_epoch=steps_per_epoch,
         validation_data=create_dataset(
             X_val, y_val, batch_size, num_classes, shuffle=True
         ),
         validation_steps=-(-len(X_val) * 3 // global_batch_size),
-        validation_freq=100,
+        validation_freq=[1] + list(range(epochs, 1, -int(epochs ** 0.5))),
         epochs=epochs,
         callbacks=[
             hvd.callbacks.BroadcastGlobalVariablesCallback(0),
@@ -138,12 +139,12 @@ def _run(args):
         create_dataset(
             X_train, y_train, batch_size, num_classes, shuffle=True, mode="refine"
         ),
-        steps_per_epoch=-(-len(X_train) // global_batch_size),
+        steps_per_epoch=steps_per_epoch,
         validation_data=create_dataset(
             X_val, y_val, batch_size, num_classes, shuffle=True
         ),
         validation_steps=-(-len(X_val) * 3 // global_batch_size),
-        validation_freq=10,
+        validation_freq=[1] + list(range(refine_epoch, 1, -int(refine_epoch ** 0.5))),
         epochs=refine_epoch,
         callbacks=[
             hvd.callbacks.BroadcastGlobalVariablesCallback(0),
@@ -310,23 +311,21 @@ def create_dataset(X, y, batch_size, num_classes, shuffle=False, mode="test"):
         aug1 = A.Compose([])
         aug2 = A.Compose([])
 
-    def do_aug1(img):
-        return aug1(image=img)["image"]
+    def process1(X_i, y_i):
+        X_i = tf.numpy_function(
+            lambda img: aug1(image=img)["image"], inp=[X_i], Tout=tf.uint8
+        )
+        X_i = tf.cast(X_i, tf.float32)
+        y_i = tf.one_hot(y_i, num_classes, dtype=tf.float32)
+        return X_i, y_i
 
-    def do_aug2(img):
-        return aug2(image=img)["image"]
-
-    def process1(X, y):
-        X = tf.numpy_function(do_aug1, inp=[X], Tout=tf.uint8)
-        X = tf.cast(X, tf.float32)
-        y = tf.one_hot(y, num_classes, dtype=tf.float32)
-        return X, y
-
-    def process2(X, y):
-        X = tf.numpy_function(do_aug2, inp=[X], Tout=tf.float32)
-        X = tf.ensure_shape(X, (None, None, None))
-        X = X / 127.5 - 1
-        return X, y
+    def process2(X_i, y_i):
+        X_i = tf.numpy_function(
+            lambda img: aug2(image=img)["image"], inp=[X_i], Tout=tf.float32
+        )
+        X_i = tf.ensure_shape(X_i, (None, None, None))
+        X_i = X_i / 127.5 - 1
+        return X_i, y_i
 
     ds = tf.data.Dataset.from_tensor_slices((X, y))
     ds = ds.shuffle(buffer_size=len(X)) if shuffle else ds
@@ -376,12 +375,12 @@ def mixup(
 class RandomCompose(A.Compose):
     """シャッフル付きCompose。"""
 
-    def __call__(self, force_apply=False, **data):
+    def __call__(self, *args, force_apply=False, **data):
         """変換の適用。"""
         backup = self.transforms.transforms.copy()
         try:
             random.shuffle(self.transforms.transforms)
-            return super().__call__(force_apply=force_apply, **data)
+            return super().__call__(*args, force_apply=force_apply, **data)
         finally:
             self.transforms.transforms = backup
 
@@ -400,9 +399,9 @@ class RandomTransform(A.DualTransform):
     @classmethod
     def create_refine(
         cls,
-        size: typing.Tuple[int, int],
-        flip: typing.Tuple[bool, bool] = (False, True),
-        translate: typing.Tuple[float, float] = (0.0625, 0.0625),
+        size: tuple[int, int],
+        flip: tuple[bool, bool] = (False, True),
+        translate: tuple[float, float] = (0.0625, 0.0625),
         border_mode: str = "edge",
         clip_bboxes=True,
         always_apply: bool = False,
@@ -424,16 +423,16 @@ class RandomTransform(A.DualTransform):
 
     def __init__(
         self,
-        size: typing.Tuple[int, int],
-        flip: typing.Tuple[bool, bool] = (False, True),
-        translate: typing.Tuple[float, float] = (0.125, 0.125),
+        size: tuple[int, int],
+        flip: tuple[bool, bool] = (False, True),
+        translate: tuple[float, float] = (0.125, 0.125),
         scale_prob: float = 0.5,
-        scale_range: typing.Tuple[float, float] = (2 / 3, 3 / 2),
+        scale_range: tuple[float, float] = (2 / 3, 3 / 2),
         base_scale: float = 1.0,
         aspect_prob: float = 0.5,
-        aspect_range: typing.Tuple[float, float] = (3 / 4, 4 / 3),
+        aspect_range: tuple[float, float] = (3 / 4, 4 / 3),
         rotate_prob: float = 0.25,
-        rotate_range: typing.Tuple[int, int] = (-15, +15),
+        rotate_range: tuple[int, int] = (-15, +15),
         border_mode: str = "edge",
         clip_bboxes: bool = True,
         always_apply: bool = False,
@@ -612,6 +611,8 @@ class RandomTransform(A.DualTransform):
 
 
 class RandomErasing(A.ImageOnlyTransform):  # pylint: disable=abstract-method
+    """Random Erasing <https://arxiv.org/abs/1708.04896>"""
+
     def __init__(
         self, scale=(0.02, 0.4), rate=(1 / 3, 3), alpha=None, always_apply=False, p=0.5
     ):
@@ -645,7 +646,7 @@ class RandomErasing(A.ImageOnlyTransform):  # pylint: disable=abstract-method
         return img
 
 
-@tf.keras.utils.register_keras_serializable(package="pytoolkit")
+@tf.keras.utils.register_keras_serializable()
 class BlurPooling2D(tf.keras.layers.Layer):
     """Blur Pooling Layer <https://arxiv.org/abs/1904.11486>"""
 
@@ -690,7 +691,7 @@ class BlurPooling2D(tf.keras.layers.Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
-def normalize_tuple(value, n: int) -> typing.Tuple[int, ...]:
+def normalize_tuple(value, n: int) -> tuple[int, ...]:
     """n個の要素を持つtupleにして返す。"""
     assert value is not None
     if isinstance(value, int):
@@ -699,6 +700,66 @@ def normalize_tuple(value, n: int) -> typing.Tuple[int, ...]:
         value = tuple(value)
         assert len(value) == n
         return value
+
+
+@tf.keras.utils.register_keras_serializable()
+class CosineAnnealing(tf.keras.optimizers.schedules.LearningRateSchedule):
+    """Cosine Annealing without restart。
+
+    Args:
+        initial_learning_rate: 初期学習率
+        decay_steps: 全体のステップ数 (len(train_set) // (batch_size * app.num_replicas_in_sync * tk.hvd.size()) * epochs)
+        warmup_steps: 最初にlinear warmupするステップ数。既定値は1000。ただし最大でdecay_steps // 8。
+        name: 名前
+
+    References:
+        - SGDR: Stochastic Gradient Descent with Warm Restarts <https://arxiv.org/abs/1608.03983>
+
+    """
+
+    def __init__(
+        self,
+        initial_learning_rate: float,
+        decay_steps: int,
+        warmup_steps: int = 1000,
+        name: str = None,
+    ):
+        super().__init__()
+        self.initial_learning_rate = initial_learning_rate
+        self.decay_steps = decay_steps
+        self.warmup_steps = min(warmup_steps, decay_steps // 8)
+        self.name = name
+        assert initial_learning_rate > 0
+        assert 0 <= self.warmup_steps < self.decay_steps
+
+    def __call__(self, step):
+        with tf.name_scope(self.name or "CosineAnnealing"):
+            initial_learning_rate = tf.cast(
+                self.initial_learning_rate, dtype=tf.float32
+            )
+            decay_steps = tf.cast(self.decay_steps, tf.float32)
+            warmup_steps = tf.cast(self.warmup_steps, tf.float32)
+            step = tf.cast(step, tf.float32)
+
+            # linear warmup
+            fraction1 = (step + 1) / tf.math.maximum(warmup_steps, 1)
+
+            # cosine annealing
+            wdecay_steps = decay_steps - warmup_steps
+            warmed_steps = tf.math.minimum(step - warmup_steps + 1, wdecay_steps)
+            r = warmed_steps / wdecay_steps
+            fraction2 = 0.5 * (1.0 + tf.math.cos(np.pi * r))
+
+            fraction = tf.where(step < warmup_steps, fraction1, fraction2)
+            return initial_learning_rate * fraction
+
+    def get_config(self):
+        return {
+            "initial_learning_rate": self.initial_learning_rate,
+            "decay_steps": self.decay_steps,
+            "warmup_steps": self.warmup_steps,
+            "name": self.name,
+        }
 
 
 if __name__ == "__main__":

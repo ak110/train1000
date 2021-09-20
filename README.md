@@ -9,17 +9,17 @@ tf.kerasを使って1ファイルで全て実装したので、初心者にも�
 ## スコア (CIFAR-10)
 
 ```txt
-[INFO ] Val Accuracy:       0.8149 (5 runs)
-[INFO ] Val Cross Entropy:  0.7342 (5 runs)
-[INFO ] Test Accuracy:      0.8130 (5 runs)
-[INFO ] Test Cross Entropy: 0.7386 (5 runs)
+[INFO ] Val Accuracy:       0.8105 (5 runs)
+[INFO ] Val Cross Entropy:  0.7392 (5 runs)
+[INFO ] Test Accuracy:      0.8107 (5 runs)
+[INFO ] Test Cross Entropy: 0.7455 (5 runs)
 ```
 
 Valは訓練データの末尾10,000件。(独自)
 
 ## 動かすために必要なもの
 
-- TensorFlow (2.1.0で動作確認)
+- TensorFlow (2.6.0で動作確認)
 - Horovod
 - OpenMPI (複数GPU時)
 - albumentations
@@ -36,3 +36,4 @@ Valは訓練データの末尾10,000件。(独自)
 - Label smoothing <https://myrtle.ai/how-to-train-your-resnet-8-bag-of-tricks/>
 - Refined Data Augmentation <https://arxiv.org/abs/1909.09148>
 - その他たくさんの怪しいDataAugmentation
+- TTA
