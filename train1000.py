@@ -243,21 +243,18 @@ def create_network(input_shape, num_classes):
     )
     act = functools.partial(tf.keras.layers.Activation, "relu")
 
-    def blocks(filters, count, down=True):
+    def blocks(filters, scale=4, down=True):
         def layers(x):
             if down:
-                x = conv2d(filters)(x)
+                # MaxBlurPool
+                x = tf.keras.layers.MaxPooling2D(3, strides=1, padding="same")(x)
                 x = BlurPooling2D(taps=4)(x)
-                x = bn()(x)
-            for _ in range(count):
-                sc = x
-                x = conv2d(filters)(x)
-                x = bn()(x)
-                x = act()(x)
-                x = conv2d(filters)(x)
-                # resblockのadd前だけgammaの初期値を0にする。 <https://arxiv.org/abs/1812.01187>
-                x = bn(gamma_initializer="zeros")(x)
-                x = tf.keras.layers.add([sc, x])
+            # 受容野だけ考えるとConv2個くらいでいい気がする。
+            # TransformersのFFNとかinverted residualsとか風に* scaleでパラメータ数稼ぎ。
+            x = conv2d(filters * scale)(x)
+            x = bn()(x)
+            x = act()(x)
+            x = conv2d(filters)(x)
             x = bn()(x)
             x = act()(x)
             return x
@@ -265,12 +262,20 @@ def create_network(input_shape, num_classes):
         return layers
 
     inputs = x = tf.keras.layers.Input(input_shape)
-    x = conv2d(128)(x)
+    x = tf.keras.layers.concatenate(
+        [
+            conv2d(64, kernel_size=3)(x),
+            conv2d(32, kernel_size=5)(x),
+            conv2d(32, kernel_size=7)(x),
+        ]
+    )
     x = bn()(x)
-    x = blocks(128, 8, down=False)(x)
-    x = blocks(256, 8)(x)
-    x = blocks(512, 8)(x)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = act()(x)
+    x = blocks(128, down=False)(x)
+    x = blocks(256)(x)
+    x = blocks(256, down=False)(x)  # 浅いとうまくいかないので少し深くしてみる
+    x = blocks(512)(x)
+    x = GeMPooling2D()(x)
     x = tf.keras.layers.Dense(
         num_classes, use_bias=False, kernel_regularizer=tf.keras.regularizers.l2(1e-4)
     )(x)
@@ -841,7 +846,7 @@ class CosineAnnealing(tf.keras.optimizers.schedules.LearningRateSchedule):
 
     Args:
         initial_learning_rate: 初期学習率
-        decay_steps: 全体のステップ数 (len(train_set) // (batch_size * app.num_replicas_in_sync * tk.hvd.size()) * epochs)
+        decay_steps: 全体のステップ数: -(-len(train_set) // (batch_size * num_gpus)) * epochs
         warmup_steps: 最初にlinear warmupするステップ数。既定値は1000。ただし最大でdecay_steps // 8。
         name: 名前
 
@@ -893,6 +898,82 @@ class CosineAnnealing(tf.keras.optimizers.schedules.LearningRateSchedule):
             "warmup_steps": self.warmup_steps,
             "name": self.name,
         }
+
+
+@tf.keras.utils.register_keras_serializable()
+class GeMPooling2D(tf.keras.layers.Layer):
+    """Generalized Mean Pooling (GeM)
+
+    References:
+        - <https://arxiv.org/abs/1711.02512>
+
+    """
+
+    def __init__(
+        self,
+        epsilon=1e-6,
+        p_initializer=None,
+        p_regularizer=None,
+        p_constraint=None,
+        p_trainable=True,
+        **kargs,
+    ):
+        super().__init__(**kargs)
+        self.epsilon = epsilon
+        self.p_initializer = tf.keras.initializers.get(
+            p_initializer
+            if p_initializer is not None
+            else tf.keras.initializers.constant(3)
+        )
+        self.p_regularizer = tf.keras.regularizers.get(p_regularizer)
+        self.p_constraint = tf.keras.constraints.get(
+            # オーバーフロー対策で適当に制約をつける
+            p_constraint
+            if p_constraint is not None
+            else GeMPooling2D._p_constraint
+        )
+        self.p_trainable = p_trainable
+        self.p = None
+
+    @staticmethod
+    def _p_constraint(p):
+        return tf.clip_by_value(p, 1.0, 5.0)
+
+    def build(self, input_shape):
+        self.p = self.add_weight(
+            shape=(),
+            initializer=self.p_initializer,
+            regularizer=self.p_regularizer,
+            constraint=self.p_constraint,
+            trainable=self.p_trainable,
+            name="p",
+        )
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        assert len(input_shape) == 4
+        return (input_shape[0], input_shape[3])
+
+    def call(self, inputs, **kwargs):
+        del kwargs
+        x = tf.cast(inputs, tf.float32)  # float16ではオーバーフローしやすいので一応
+        p = tf.cast(self.p, tf.float32)
+        x = tf.math.maximum(x, self.epsilon) ** p
+        x = tf.math.reduce_mean(x, axis=(1, 2))  # GAP
+        x = x ** (1 / p)
+        x = tf.cast(x, inputs.dtype)
+        return x
+
+    def get_config(self):
+        config = {
+            "epsilon": self.epsilon,
+            "p_initializer": tf.keras.initializers.serialize(self.p_initializer),
+            "p_regularizer": tf.keras.regularizers.serialize(self.p_regularizer),
+            "p_constraint": tf.keras.constraints.serialize(self.p_constraint),
+            "p_trainable": self.p_trainable,
+        }
+        base_config = super().get_config()
+        return dict(list(base_config.items()) + list(config.items()))
 
 
 if __name__ == "__main__":
