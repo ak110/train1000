@@ -392,7 +392,10 @@ class RandomTransform(A.DualTransform):
         size: 出力サイズ(h, w)
         flip: 反転の有無(vertical, horizontal)
         translate: 平行移動の量(vertical, horizontal)
-        border_mode: edge, reflect, wrap
+        border_mode: edge, reflect, wrap, zero, half, one
+        clip_bboxes: はみ出すbboxをclippingするか否か
+        with_bboxes: Trueならできるだけbboxを1つ以上含むようにcropする (bboxesが必須になってしまうため既定値False)
+        mode: "normal", "preserve_aspect", "crop"
 
     """
 
@@ -403,20 +406,49 @@ class RandomTransform(A.DualTransform):
         flip: tuple[bool, bool] = (False, True),
         translate: tuple[float, float] = (0.0625, 0.0625),
         border_mode: str = "edge",
-        clip_bboxes=True,
+        clip_bboxes: bool = True,
+        with_bboxes: bool = False,
+        mode: str = "normal",
         always_apply: bool = False,
         p: float = 1.0,
-    ):
+    ) -> RandomTransform:
         """Refined Data Augmentation <https://arxiv.org/abs/1909.09148> 用の控えめバージョンを作成する。"""
         return cls(
             size=size,
             flip=flip,
             translate=translate,
-            border_mode=border_mode,
             scale_prob=0.0,
             aspect_prob=0.0,
             rotate_prob=0.0,
+            border_mode=border_mode,
             clip_bboxes=clip_bboxes,
+            with_bboxes=with_bboxes,
+            mode=mode,
+            always_apply=always_apply,
+            p=p,
+        )
+
+    @classmethod
+    def create_test(
+        cls,
+        size: tuple[int, int],
+        border_mode: str = "edge",
+        clip_bboxes: bool = True,
+        mode: str = "normal",
+        always_apply: bool = False,
+        p: float = 1.0,
+    ) -> RandomTransform:
+        """Data Augmentation無しバージョン(リサイズのみ)を作成する。"""
+        return cls(
+            size=size,
+            flip=(False, False),
+            translate=(0.0, 0.0),
+            scale_prob=0.0,
+            aspect_prob=0.0,
+            rotate_prob=0.0,
+            border_mode=border_mode,
+            clip_bboxes=clip_bboxes,
+            mode=mode,
             always_apply=always_apply,
             p=p,
         )
@@ -435,6 +467,8 @@ class RandomTransform(A.DualTransform):
         rotate_range: tuple[int, int] = (-15, +15),
         border_mode: str = "edge",
         clip_bboxes: bool = True,
+        with_bboxes: bool = False,
+        mode: str = "normal",
         always_apply: bool = False,
         p: float = 1.0,
     ):
@@ -451,20 +485,33 @@ class RandomTransform(A.DualTransform):
         self.rotate_range = rotate_range
         self.border_mode = border_mode
         self.clip_bboxes = clip_bboxes
+        self.with_bboxes = with_bboxes
+        self.mode = mode
 
-    def apply(self, image, m, interp=None, **params):
+    def apply(self, img, m, interp=None, **params):
         # pylint: disable=arguments-differ
-        cv2_border = {
-            "edge": cv2.BORDER_REPLICATE,
-            "reflect": cv2.BORDER_REFLECT_101,
-            "wrap": cv2.BORDER_WRAP,
+        cv2_border, borderValue = {
+            "edge": (cv2.BORDER_REPLICATE, None),
+            "reflect": (cv2.BORDER_REFLECT_101, None),
+            "wrap": (cv2.BORDER_WRAP, None),
+            "zero": (cv2.BORDER_CONSTANT, [0, 0, 0]),
+            "half": (
+                cv2.BORDER_CONSTANT,
+                [0.5, 0.5, 0.5]
+                if img.dtype in (np.float32, np.float64)
+                else [127, 127, 127],
+            ),
+            "one": (
+                cv2.BORDER_CONSTANT,
+                [1, 1, 1] if img.dtype in (np.float32, np.float64) else [255, 255, 255],
+            ),
         }[self.border_mode]
 
         if interp == "nearest":
             cv2_interp = cv2.INTER_NEAREST
         else:
             # 縮小ならINTER_AREA, 拡大ならINTER_LANCZOS4
-            sh, sw = image.shape[:2]
+            sh, sw = img.shape[:2]
             dr = cv2.perspectiveTransform(
                 np.array([(0, 0), (sw, 0), (sw, sh), (0, sh)])
                 .reshape((-1, 1, 2))
@@ -475,53 +522,71 @@ class RandomTransform(A.DualTransform):
             dh = min(np.linalg.norm(dr[3] - dr[0]), np.linalg.norm(dr[2] - dr[1]))
             cv2_interp = cv2.INTER_AREA if dw <= sw or dh <= sh else cv2.INTER_LANCZOS4
 
-        if image.ndim == 2 or image.shape[-1] in (1, 3):
-            image = cv2.warpPerspective(
-                image, m, self.size[::-1], flags=cv2_interp, borderMode=cv2_border
+        if img.ndim == 2 or img.shape[-1] in (1, 3):
+            img = cv2.warpPerspective(
+                img,
+                m,
+                self.size[::-1],
+                flags=cv2_interp,
+                borderMode=cv2_border,
+                borderValue=borderValue,
             )
-            if image.ndim == 2:
-                image = np.expand_dims(image, axis=-1)
+            if img.ndim == 2:
+                img = np.expand_dims(img, axis=-1)
         else:
             resized_list = [
                 cv2.warpPerspective(
-                    image[:, :, ch],
+                    img[:, :, ch],
                     m,
                     self.size[::-1],
                     flags=cv2_interp,
                     borderMode=cv2_border,
+                    borderValue=borderValue,
                 )
-                for ch in range(image.shape[-1])
+                for ch in range(img.shape[-1])
             ]
-            image = np.transpose(resized_list, (1, 2, 0))
-        return image
+            img = np.transpose(resized_list, (1, 2, 0))
+        return img
 
-    def apply_to_bbox(self, bbox, m, image_size, **params):
+    def apply_to_bbox(self, bbox, **params):
+        return self.apply_to_bboxes([tuple(bbox) + (1, 1, "A")], **params)[0][:4]
+
+    def apply_to_bboxes(self, bboxes, m, image_size, **params):
         # pylint: disable=arguments-differ
         del params
-        bbox = np.asarray(bbox)
-        assert bbox.shape == (4,)
-        bbox *= np.array([image_size[1], image_size[0]] * 2)
-        bbox = cv2.perspectiveTransform(
-            bbox.reshape((-1, 1, 2)).astype(np.float32), m
-        ).reshape(bbox.shape)
-        if bbox[2] < bbox[0]:
-            bbox = bbox[[2, 1, 0, 3]]
-        if bbox[3] < bbox[1]:
-            bbox = bbox[[0, 3, 2, 1]]
-        bbox /= np.array([self.size[1], self.size[0]] * 2)
-        assert bbox.shape == (4,)
+        if len(bboxes) <= 0:
+            return bboxes
+        etc = [tuple(bbox[4:]) for bbox in bboxes]
+        bboxes = np.array([bbox[:4] for bbox in bboxes], dtype=np.float32)
+
+        # 座標変換
+        bboxes *= [[image_size[1], image_size[0]] * 2]
+        bboxes = cv2.perspectiveTransform(bboxes.reshape((-1, 1, 2)), m).reshape(
+            bboxes.shape
+        )
+        bboxes /= [[self.size[1], self.size[0]] * 2]
+
+        # x1>x2やy1>y2になっていたら直す
+        bboxes = bboxes.reshape((-1, 2, 2))
+        bboxes = np.concatenate([bboxes.min(axis=1), bboxes.max(axis=1)], axis=-1)
+        assert (bboxes[:, 0] <= bboxes[:, 2]).all()
+        assert (bboxes[:, 1] <= bboxes[:, 3]).all()
+
         if self.clip_bboxes:
-            bbox = np.clip(bbox, 0, 1)
-        return tuple(bbox)
+            bboxes = np.clip(bboxes, 0, 1)
 
-    def apply_to_keypoint(self, keypoint, m, **params):
+        return [tuple(bbox) + etc for bbox, etc in zip(bboxes, etc)]
+
+    def apply_to_keypoint(self, keypoint, **params):
+        return self.apply_to_keypoints([keypoint], **params)[0]
+
+    def apply_to_keypoints(self, keypoints, m, **params):
         # pylint: disable=arguments-differ
         del params
-        xy = np.asarray(keypoint[:2])
-        xy = cv2.perspectiveTransform(
-            xy.reshape((-1, 1, 2)).astype(np.float32), m
-        ).reshape(xy.shape)
-        return tuple(xy) + tuple(keypoint[2:])
+        etc = [tuple(keypoint[2:]) for keypoint in keypoints]
+        xys = np.array([keypoint[:2] for keypoint in keypoints], dtype=np.float32)
+        xys = cv2.perspectiveTransform(xys.reshape((-1, 1, 2)), m).reshape(xys.shape)
+        return [tuple(xy) + etc for xy, etc in zip(xys, etc)]
 
     def apply_to_mask(self, img, interp=None, **params):
         # pylint: disable=arguments-differ
@@ -529,7 +594,29 @@ class RandomTransform(A.DualTransform):
         return self.apply(img, interp="nearest", **params)
 
     def get_params_dependent_on_targets(self, params):
-        image = params["image"]
+        if self.with_bboxes and len(params["bboxes"]) >= 1:
+            # self.with_bboxes == Trueかつ元々bboxが1個以上あるなら、
+            # 出来るだけ有効なbboxが1個以上あるようになるまでretryする。
+            # (ただし極端な条件の場合ランダム任せだと厳しいのでリトライの上限は適当)
+            for _ in range(100):  # retry
+                d = self._get_params(params)
+                bboxes = np.asarray(
+                    [
+                        np.clip(bbox[:4], 0, 1)
+                        for bbox in self.apply_to_bboxes(params["bboxes"], **d)
+                    ]
+                )
+                valid_bboxes = sum(
+                    np.prod(np.maximum(bb[2:] - bb[:2], 0.0)) > 0 for bb in bboxes
+                )
+                if valid_bboxes >= 1:
+                    break
+        else:
+            d = self._get_params(params)
+        return d
+
+    def _get_params(self, params):
+        img = params["image"]
         scale = (
             self.base_scale
             * np.exp(
@@ -550,48 +637,79 @@ class RandomTransform(A.DualTransform):
 
         flip_v = self.flip[0] and random.random() <= 0.5
         flip_h = self.flip[1] and random.random() <= 0.5
-        scale_v = scale / np.sqrt(ar)
-        scale_h = scale * np.sqrt(ar)
+        scale = np.array([scale / np.sqrt(ar), scale * np.sqrt(ar)])
         degrees = (
             random.uniform(self.rotate_range[0], self.rotate_range[1])
             if random.random() <= self.rotate_prob
             else 0
         )
-        pos_v = random.uniform(0, 1)
-        pos_h = random.uniform(0, 1)
-        translate_v = random.uniform(-self.translate[0], self.translate[0])
-        translate_h = random.uniform(-self.translate[1], self.translate[1])
+        pos = np.array([random.uniform(-0.5, +0.5), random.uniform(-0.5, +0.5)])
+        translate = np.array(
+            [
+                random.uniform(-self.translate[0], self.translate[0]),
+                random.uniform(-self.translate[1], self.translate[1]),
+            ]
+        )
         # 左上から時計回りに座標を用意
         src_points = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
-        dst_points = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
+        if self.mode == "normal":
+            # アスペクト比を無視して出力サイズに合わせる
+            dst_points = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
+        elif self.mode == "preserve_aspect":
+            # アスペクト比を維持するように縮小する
+            if img.shape[0] < img.shape[1]:
+                # 横長
+                hr = img.shape[0] / img.shape[1]
+                yr = (1 - hr) / 2
+                dst_points = np.array(
+                    [[0, yr], [1, yr], [1, yr + hr], [0, yr + hr]], dtype=np.float32
+                )
+            else:
+                # 縦長
+                wr = img.shape[1] / img.shape[0]
+                xr = (1 - wr) / 2
+                dst_points = np.array(
+                    [[xr, 0], [xr + wr, 0], [xr + wr, 1], [xr, 1]], dtype=np.float32
+                )
+        elif self.mode == "crop":
+            # 入力サイズによらず固定サイズでcrop
+            hr = self.size[0] / img.shape[0]
+            wr = self.size[1] / img.shape[1]
+            yr = random.uniform(0, 1 - hr)
+            xr = random.uniform(0, 1 - wr)
+            dst_points = np.array(
+                [[xr, yr], [xr + wr, yr], [xr + wr, yr + hr], [xr, yr + hr]],
+                dtype=np.float32,
+            )
+        else:
+            raise ValueError(f"Invalid mode: {self.mode}")
         # 反転
         if flip_h:
             dst_points = dst_points[[1, 0, 3, 2]]
         if flip_v:
             dst_points = dst_points[[3, 2, 1, 0]]
-        # 移動
-        src_points[:, 0] -= translate_h
-        src_points[:, 1] -= translate_v
+        # 原点が中心になるように移動
+        src_points -= 0.5
         # 回転
         theta = degrees * np.pi * 2 / 360
         c, s = np.cos(theta), np.sin(theta)
         r = np.array([[c, -s], [s, c]], dtype=np.float32)
-        src_points = np.dot(r, (src_points - 0.5).T).T + 0.5
+        src_points = np.dot(r, src_points.T).T
         # スケール変換
-        src_points[:, 0] /= scale_h
-        src_points[:, 1] /= scale_v
-        src_points[:, 0] -= (1 / scale_h - 1) * pos_h
-        src_points[:, 1] -= (1 / scale_v - 1) * pos_v
+        src_points /= scale
+        # 移動
+        # スケール変換で余った分 + 最初に0.5動かした分 + translate分
+        src_points += (1 - 1 / scale) * pos + 0.5 + translate / scale
         # 変換行列の作成
-        src_points[:, 0] *= image.shape[1]
-        src_points[:, 1] *= image.shape[0]
-        dst_points[:, 0] *= self.size[1]
-        dst_points[:, 1] *= self.size[0]
+        src_points *= [img.shape[1], img.shape[0]]
+        dst_points *= [self.size[1], self.size[0]]
         m = cv2.getPerspectiveTransform(src_points, dst_points)
-        return {"m": m, "image_size": image.shape[:2]}
+        return {"m": m, "image_size": img.shape[:2]}
 
     @property
     def targets_as_params(self):
+        if self.with_bboxes:
+            return ["image", "bboxes"]
         return ["image"]
 
     def get_transform_init_args_names(self):
@@ -607,6 +725,9 @@ class RandomTransform(A.DualTransform):
             "rotate_prob",
             "rotate_range",
             "border_mode",
+            "clip_bboxes",
+            "with_bboxes",
+            "mode",
         )
 
 
@@ -654,6 +775,7 @@ class BlurPooling2D(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.taps = taps
         self.strides = normalize_tuple(strides, 2)
+        self.kernel = None
 
     def compute_output_shape(self, input_shape):
         assert len(input_shape) == 4
@@ -666,11 +788,9 @@ class BlurPooling2D(tf.keras.layers.Layer):
         ) // self.strides[1]
         return tuple(input_shape)
 
-    def call(self, inputs, **kwargs):
-        del kwargs
-        in_filters = inputs.shape.as_list()[-1]
-
-        pascals_tr = np.zeros((self.taps, self.taps))
+    def build(self, input_shape):
+        in_filters = int(input_shape[-1])
+        pascals_tr = np.zeros((self.taps, self.taps), dtype=np.float32)
         pascals_tr[0, 0] = 1
         for i in range(1, self.taps):
             pascals_tr[i, :] = pascals_tr[i - 1, :]
@@ -679,11 +799,24 @@ class BlurPooling2D(tf.keras.layers.Layer):
         filter2d = filter1d[np.newaxis, :] * filter1d[:, np.newaxis]
         filter2d = filter2d * (self.taps ** 2 / filter2d.sum())
         kernel = np.tile(filter2d[:, :, np.newaxis, np.newaxis], (1, 1, in_filters, 1))
-        kernel = tf.constant(kernel, dtype=inputs.dtype)
+        self.kernel = tf.constant(kernel, dtype=tf.float32)
+        super().build(input_shape)
 
-        return tf.nn.depthwise_conv2d(
+    def call(self, inputs, **kwargs):
+        del kwargs
+        kernel = tf.cast(self.kernel, inputs.dtype)
+        s = tf.shape(inputs)
+        outputs = tf.nn.depthwise_conv2d(
             inputs, kernel, strides=(1,) + self.strides + (1,), padding="SAME"
         )
+        norm = tf.ones((s[0], s[1], s[2], 1), dtype=inputs.dtype)
+        norm = tf.nn.depthwise_conv2d(
+            norm,
+            kernel[:, :, :1, :],
+            strides=(1,) + self.strides + (1,),
+            padding="SAME",
+        )
+        return outputs / norm
 
     def get_config(self):
         config = {"taps": self.taps, "strides": self.strides}

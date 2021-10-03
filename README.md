@@ -9,10 +9,10 @@ tf.kerasを使って1ファイルで全て実装したので、初心者にも�
 ## スコア (CIFAR-10)
 
 ```txt
-[INFO ] Val Accuracy:       0.8105 (5 runs)
-[INFO ] Val Cross Entropy:  0.7392 (5 runs)
-[INFO ] Test Accuracy:      0.8107 (5 runs)
-[INFO ] Test Cross Entropy: 0.7455 (5 runs)
+[INFO ] Val Accuracy:       0.8106 (5 runs)
+[INFO ] Val Cross Entropy:  0.7423 (5 runs)
+[INFO ] Test Accuracy:      0.8083 (5 runs)
+[INFO ] Test Cross Entropy: 0.7477 (5 runs)
 ```
 
 Valは訓練データの末尾10,000件。(独自)
